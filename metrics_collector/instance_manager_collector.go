@@ -5,17 +5,17 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	metricsclientset "k8s.io/metrics/pkg/client/clientset/versioned"
 
-	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/longhorn/longhorn-manager/datastore"
-	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	"github.com/longhorn/longhorn-manager/types"
 	"github.com/longhorn/longhorn-manager/util"
+
+	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 )
 
 type InstanceManagerCollector struct {
@@ -220,7 +220,7 @@ func (imc *InstanceManagerCollector) collectGrpcConnection(ch chan<- prometheus.
 		}
 	}()
 
-	engineInstanceManagers, err := imc.ds.ListInstanceManagersByNode(imc.currentNodeID, longhorn.InstanceManagerTypeEngine)
+	engineInstanceManagers, err := imc.ds.ListInstanceManagersByNodeRO(imc.currentNodeID, longhorn.InstanceManagerTypeEngine)
 	if err != nil {
 		imc.logger.WithError(err).Warn("Error during scrape")
 		return

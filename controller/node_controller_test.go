@@ -6,23 +6,23 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/informers"
-	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/controller"
 
-	monitor "github.com/longhorn/longhorn-manager/controller/monitor"
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	clientset "k8s.io/client-go/kubernetes"
+
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/types"
+	"github.com/longhorn/longhorn-manager/util"
 
+	monitor "github.com/longhorn/longhorn-manager/controller/monitor"
 	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	lhfake "github.com/longhorn/longhorn-manager/k8s/pkg/client/clientset/versioned/fake"
-	lhinformerfactory "github.com/longhorn/longhorn-manager/k8s/pkg/client/informers/externalversions"
-	apiextensionsfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 
 	. "gopkg.in/check.v1"
 )
@@ -35,14 +35,14 @@ const (
 )
 
 var (
-	MountPropagationBidirectional = v1.MountPropagationBidirectional
+	MountPropagationBidirectional = corev1.MountPropagationBidirectional
 )
 
 type NodeTestCase struct {
 	nodes            map[string]*longhorn.Node
-	pods             map[string]*v1.Pod
+	pods             map[string]*corev1.Pod
 	replicas         []*longhorn.Replica
-	kubeNodes        map[string]*v1.Node
+	kubeNodes        map[string]*corev1.Node
 	instanceManagers map[string]*longhorn.InstanceManager
 
 	expectNodeStatus       map[string]longhorn.NodeStatus
@@ -50,9 +50,9 @@ type NodeTestCase struct {
 	expectOrphans          []*longhorn.Orphan
 }
 
-func newTestNodeController(lhInformerFactory lhinformerfactory.SharedInformerFactory, kubeInformerFactory informers.SharedInformerFactory,
-	lhClient *lhfake.Clientset, kubeClient *fake.Clientset, extensionsClient *apiextensionsfake.Clientset, controllerID string) *NodeController {
-	ds := datastore.NewDataStore(lhInformerFactory, lhClient, kubeInformerFactory, kubeClient, extensionsClient, TestNamespace)
+func newTestNodeController(lhClient *lhfake.Clientset, kubeClient *fake.Clientset, extensionsClient *apiextensionsfake.Clientset,
+	informerFactories *util.InformerFactories, controllerID string) *NodeController {
+	ds := datastore.NewDataStore(TestNamespace, lhClient, kubeClient, extensionsClient, informerFactories)
 
 	logger := logrus.StandardLogger()
 	nc := NewNodeController(logger, ds, scheme.Scheme, kubeClient, TestNamespace, controllerID)
@@ -79,36 +79,36 @@ func fakeTopologyLabelsChecker(kubeClient clientset.Interface, vers string) (boo
 	return false, nil
 }
 
-func generateKubeNodes(testType string) map[string]*v1.Node {
-	var kubeNode1, kubeNode2 *v1.Node
+func generateKubeNodes(testType string) map[string]*corev1.Node {
+	var kubeNode1, kubeNode2 *corev1.Node
 	switch testType {
 	case KubeNodeDown:
-		kubeNode1 = newKubernetesNode(TestNode1, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionTrue)
-		kubeNode2 = newKubernetesNode(TestNode2, v1.ConditionTrue, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionTrue)
+		kubeNode1 = newKubernetesNode(TestNode1, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionTrue)
+		kubeNode2 = newKubernetesNode(TestNode2, corev1.ConditionTrue, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionTrue)
 	case KubeNodePressure:
-		kubeNode1 = newKubernetesNode(TestNode1, v1.ConditionTrue, v1.ConditionTrue, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionTrue)
-		kubeNode2 = newKubernetesNode(TestNode2, v1.ConditionTrue, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionTrue)
+		kubeNode1 = newKubernetesNode(TestNode1, corev1.ConditionTrue, corev1.ConditionTrue, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionTrue)
+		kubeNode2 = newKubernetesNode(TestNode2, corev1.ConditionTrue, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionTrue)
 	default:
-		kubeNode1 = newKubernetesNode(TestNode1, v1.ConditionTrue, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionTrue)
-		kubeNode2 = newKubernetesNode(TestNode2, v1.ConditionTrue, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionTrue)
+		kubeNode1 = newKubernetesNode(TestNode1, corev1.ConditionTrue, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionTrue)
+		kubeNode2 = newKubernetesNode(TestNode2, corev1.ConditionTrue, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionTrue)
 	}
-	return map[string]*v1.Node{
+	return map[string]*corev1.Node{
 		TestNode1: kubeNode1,
 		TestNode2: kubeNode2,
 	}
 }
 
-func generateManagerPod(testType string) map[string]*v1.Pod {
-	var daemon1, daemon2 *v1.Pod
+func generateManagerPod(testType string) map[string]*corev1.Pod {
+	var daemon1, daemon2 *corev1.Pod
 	switch testType {
 	case ManagerPodDown:
-		daemon1 = newDaemonPod(v1.PodFailed, TestDaemon1, TestNamespace, TestNode1, TestIP1, nil)
-		daemon2 = newDaemonPod(v1.PodRunning, TestDaemon2, TestNamespace, TestNode2, TestIP2, nil)
+		daemon1 = newDaemonPod(corev1.PodFailed, TestDaemon1, TestNamespace, TestNode1, TestIP1, nil)
+		daemon2 = newDaemonPod(corev1.PodRunning, TestDaemon2, TestNamespace, TestNode2, TestIP2, nil)
 	default:
-		daemon1 = newDaemonPod(v1.PodRunning, TestDaemon1, TestNamespace, TestNode1, TestIP1, &MountPropagationBidirectional)
-		daemon2 = newDaemonPod(v1.PodRunning, TestDaemon2, TestNamespace, TestNode2, TestIP2, &MountPropagationBidirectional)
+		daemon1 = newDaemonPod(corev1.PodRunning, TestDaemon1, TestNamespace, TestNode1, TestIP1, &MountPropagationBidirectional)
+		daemon2 = newDaemonPod(corev1.PodRunning, TestDaemon2, TestNamespace, TestNode2, TestIP2, &MountPropagationBidirectional)
 	}
-	return map[string]*v1.Pod{
+	return map[string]*corev1.Pod{
 		TestDaemon1: daemon1,
 		TestDaemon2: daemon2,
 	}
@@ -722,20 +722,20 @@ func (s *TestSuite) TestSyncNode(c *C) {
 
 	for name, tc := range testCases {
 		fmt.Printf("testing %v\n", name)
+
 		kubeClient := fake.NewSimpleClientset()
-		kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, controller.NoResyncPeriodFunc())
-
 		lhClient := lhfake.NewSimpleClientset()
-		lhInformerFactory := lhinformerfactory.NewSharedInformerFactory(lhClient, controller.NoResyncPeriodFunc())
 
-		nIndexer := lhInformerFactory.Longhorn().V1beta2().Nodes().Informer().GetIndexer()
-		pIndexer := kubeInformerFactory.Core().V1().Pods().Informer().GetIndexer()
+		informerFactories := util.NewInformerFactories(TestNamespace, kubeClient, lhClient, controller.NoResyncPeriodFunc())
 
-		rIndexer := lhInformerFactory.Longhorn().V1beta2().Replicas().Informer().GetIndexer()
-		knIndexer := kubeInformerFactory.Core().V1().Nodes().Informer().GetIndexer()
+		nIndexer := informerFactories.LhInformerFactory.Longhorn().V1beta2().Nodes().Informer().GetIndexer()
+		pIndexer := informerFactories.KubeInformerFactory.Core().V1().Pods().Informer().GetIndexer()
 
-		sIndexer := lhInformerFactory.Longhorn().V1beta2().Settings().Informer().GetIndexer()
-		imIndexer := lhInformerFactory.Longhorn().V1beta2().InstanceManagers().Informer().GetIndexer()
+		rIndexer := informerFactories.LhInformerFactory.Longhorn().V1beta2().Replicas().Informer().GetIndexer()
+		knIndexer := informerFactories.KubeInformerFactory.Core().V1().Nodes().Informer().GetIndexer()
+
+		sIndexer := informerFactories.LhInformerFactory.Longhorn().V1beta2().Settings().Informer().GetIndexer()
+		imIndexer := informerFactories.LhInformerFactory.Longhorn().V1beta2().InstanceManagers().Informer().GetIndexer()
 
 		imImageSetting := newDefaultInstanceManagerImageSetting()
 		imImageSetting, err := lhClient.LonghornV1beta2().Settings(TestNamespace).Create(context.TODO(), imImageSetting, metav1.CreateOptions{})
@@ -754,7 +754,7 @@ func (s *TestSuite) TestSyncNode(c *C) {
 
 		extensionsClient := apiextensionsfake.NewSimpleClientset()
 
-		nc := newTestNodeController(lhInformerFactory, kubeInformerFactory, lhClient, kubeClient, extensionsClient, TestNode1)
+		nc := newTestNodeController(lhClient, kubeClient, extensionsClient, informerFactories, TestNode1)
 		c.Assert(err, IsNil)
 
 		// create manager pod

@@ -44,6 +44,8 @@ type Interface interface {
 	InstanceManagers() InstanceManagerInformer
 	// Nodes returns a NodeInformer.
 	Nodes() NodeInformer
+	// ObjectStores returns a ObjectStoreInformer.
+	ObjectStores() ObjectStoreInformer
 	// Orphans returns a OrphanInformer.
 	Orphans() OrphanInformer
 	// RecurringJobs returns a RecurringJobInformer.
@@ -127,6 +129,11 @@ func (v *version) InstanceManagers() InstanceManagerInformer {
 // Nodes returns a NodeInformer.
 func (v *version) Nodes() NodeInformer {
 	return &nodeInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// ObjectStores returns a ObjectStoreInformer.
+func (v *version) ObjectStores() ObjectStoreInformer {
+	return &objectStoreInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
 // Orphans returns a OrphanInformer.

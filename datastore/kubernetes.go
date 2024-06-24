@@ -11,20 +11,22 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/version"
+	"k8s.io/client-go/rest"
+
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	schedulingv1 "k8s.io/api/scheduling/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/version"
-	"k8s.io/client-go/rest"
 
 	"github.com/longhorn/longhorn-manager/types"
 
@@ -50,11 +52,7 @@ func labelMapToLabelSelector(labels map[string]string) (labels.Selector, error) 
 }
 
 func (s *DataStore) GetManagerLabel() map[string]string {
-	return map[string]string{
-		// TODO standardize key
-		// longhornSystemKey: longhornSystemManager,
-		"app": types.LonghornManagerDaemonSetName,
-	}
+	return types.GetManagerLabels()
 }
 
 func (s *DataStore) getManagerSelector() (labels.Selector, error) {
@@ -80,6 +78,10 @@ func (s *DataStore) getSupportBundleManagerSelector(supportBundle *longhorn.Supp
 	})
 }
 
+func (s *DataStore) GetObjectStoreSelectorLabels(store *longhorn.ObjectStore) map[string]string {
+	return types.GetObjectStoreLabels(store)
+}
+
 // GetManagerNodeIPMap returns an object contains podIPs from list
 // of running pods with app=longhorn-manager
 func (s *DataStore) GetManagerNodeIPMap() (map[string]string, error) {
@@ -87,7 +89,7 @@ func (s *DataStore) GetManagerNodeIPMap() (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	podList, err := s.pLister.Pods(s.namespace).List(selector)
+	podList, err := s.podLister.Pods(s.namespace).List(selector)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +125,7 @@ func (s *DataStore) GetCronJobROByRecurringJob(recurringJob *longhorn.RecurringJ
 	itemMap := map[string]*batchv1.CronJob{
 		recurringJob.Name: nil,
 	}
-	list, err := s.cjLister.CronJobs(s.namespace).List(selector)
+	list, err := s.cronJobLister.CronJobs(s.namespace).List(selector)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +180,7 @@ func (s *DataStore) CreateEngineImageDaemonSet(ds *appsv1.DaemonSet) error {
 // GetEngineImageDaemonSet get DaemonSet for the given name and namespace, and
 // returns a new DaemonSet object
 func (s *DataStore) GetEngineImageDaemonSet(name string) (*appsv1.DaemonSet, error) {
-	resultRO, err := s.dsLister.DaemonSets(s.namespace).Get(name)
+	resultRO, err := s.daemonSetLister.DaemonSets(s.namespace).Get(name)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
@@ -213,23 +215,23 @@ func (s *DataStore) DeletePDB(name string) error {
 // This function returns direct reference to the internal cache object and should not be mutated.
 // Consider using this function when you can guarantee read only access and don't want the overhead of deep copies
 func (s *DataStore) GetPDBRO(name string) (*policyv1.PodDisruptionBudget, error) {
-	return s.pdbLister.PodDisruptionBudgets(s.namespace).Get(name)
+	return s.podDisruptionBudgetLister.PodDisruptionBudgets(s.namespace).Get(name)
 }
 
-// ListPDBs gets a map of PDB in s.namespace
-func (s *DataStore) ListPDBs() (map[string]*policyv1.PodDisruptionBudget, error) {
-	itemMap := map[string]*policyv1.PodDisruptionBudget{}
-
-	list, err := s.pdbLister.PodDisruptionBudgets(s.namespace).List(labels.Everything())
+// ListPDBsRO gets a map of PDB in s.namespace
+// This function returns direct reference to the internal cache objects and should not be mutated.
+// Consider using this function when you can guarantee read only access and don't want the overhead of deep copies
+func (s *DataStore) ListPDBsRO() (map[string]*policyv1.PodDisruptionBudget, error) {
+	pdbList, err := s.podDisruptionBudgetLister.PodDisruptionBudgets(s.namespace).List(labels.Everything())
 	if err != nil {
 		return nil, err
 	}
 
-	for _, itemRO := range list {
-		// Cannot use cached object from lister
-		itemMap[itemRO.Name] = itemRO.DeepCopy()
+	pdbMap := make(map[string]*policyv1.PodDisruptionBudget, len(pdbList))
+	for _, pdbRO := range pdbList {
+		pdbMap[pdbRO.Name] = pdbRO
 	}
-	return itemMap, nil
+	return pdbMap, nil
 }
 
 // CreatePod creates a Pod resource for the given pod object and namespace
@@ -240,6 +242,11 @@ func (s *DataStore) CreatePod(pod *corev1.Pod) (*corev1.Pod, error) {
 // DeletePod deletes Pod for the given name and namespace
 func (s *DataStore) DeletePod(name string) error {
 	return s.kubeClient.CoreV1().Pods(s.namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
+}
+
+// UpdatePod updates Pod for the given Pod object and namespace
+func (s *DataStore) UpdatePod(obj *corev1.Pod) (*corev1.Pod, error) {
+	return s.kubeClient.CoreV1().Pods(s.namespace).Update(context.TODO(), obj, metav1.UpdateOptions{})
 }
 
 // DeleteLease deletes Lease with the given name in s.namespace
@@ -306,23 +313,25 @@ func (s *DataStore) UpdateStorageClass(obj *storagev1.StorageClass) (*storagev1.
 // the list contains direct references to the internal cache objects and should not be mutated.
 // Consider using this function when you can guarantee read only access and don't want the overhead of deep copies
 func (s *DataStore) ListPodsRO(namespace string) ([]*corev1.Pod, error) {
-	return s.pLister.Pods(namespace).List(labels.Everything())
+	return s.podLister.Pods(namespace).List(labels.Everything())
 }
 
 // GetPod returns a mutable Pod object for the given name and namespace
 func (s *DataStore) GetPod(name string) (*corev1.Pod, error) {
-	resultRO, err := s.pLister.Pods(s.namespace).Get(name)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, err
+	var pod *corev1.Pod
+	podRO, err := s.GetPodRO(s.namespace, name)
+	if podRO != nil {
+		pod = podRO.DeepCopy()
 	}
-	return resultRO.DeepCopy(), nil
+	return pod, err
 }
 
 func (s *DataStore) GetPodRO(namespace, name string) (*corev1.Pod, error) {
-	return s.pLister.Pods(namespace).Get(name)
+	pod, err := s.podLister.Pods(namespace).Get(name)
+	if err != nil && apierrors.IsNotFound(err) {
+		err = nil
+	}
+	return pod, err
 }
 
 // GetPodContainerLog dumps the log of a container in a Pod object for the given name and namespace.
@@ -342,12 +351,12 @@ func (s *DataStore) CreateDaemonSet(daemonSet *appsv1.DaemonSet) (*appsv1.Daemon
 
 // GetDaemonSet gets the DaemonSet for the given name and namespace
 func (s *DataStore) GetDaemonSet(name string) (*appsv1.DaemonSet, error) {
-	return s.dsLister.DaemonSets(s.namespace).Get(name)
+	return s.daemonSetLister.DaemonSets(s.namespace).Get(name)
 }
 
 // ListDaemonSet gets a list of all DaemonSet for the given namespace
 func (s *DataStore) ListDaemonSet() ([]*appsv1.DaemonSet, error) {
-	return s.dsLister.DaemonSets(s.namespace).List(labels.Everything())
+	return s.daemonSetLister.DaemonSets(s.namespace).List(labels.Everything())
 }
 
 func (s *DataStore) ListDaemonSetWithLabels(labels map[string]string) ([]*appsv1.DaemonSet, error) {
@@ -355,7 +364,7 @@ func (s *DataStore) ListDaemonSetWithLabels(labels map[string]string) ([]*appsv1
 	if err != nil {
 		return nil, err
 	}
-	return s.dsLister.DaemonSets(s.namespace).List(selector)
+	return s.daemonSetLister.DaemonSets(s.namespace).List(selector)
 }
 
 // UpdateDaemonSet updates the DaemonSet for the given DaemonSet object and namespace
@@ -375,14 +384,29 @@ func (s *DataStore) CreateDeployment(obj *appsv1.Deployment) (*appsv1.Deployment
 	return s.kubeClient.AppsV1().Deployments(s.namespace).Create(context.TODO(), obj, metav1.CreateOptions{})
 }
 
+func (s *DataStore) GetDeploymentRO(name string) (*appsv1.Deployment, error) {
+	return s.deploymentLister.Deployments(s.namespace).Get(name)
+}
+
 // GetDeployment gets the Deployment for the given name and namespace
 func (s *DataStore) GetDeployment(name string) (*appsv1.Deployment, error) {
-	return s.dpLister.Deployments(s.namespace).Get(name)
+	dpl, err := s.GetDeploymentRO(name)
+	if err != nil {
+		return nil, err
+	}
+	return dpl.DeepCopy(), nil
+}
+
+// ListDeploymentsByLabels returns a list of all deployments with labels
+// matching the provided map
+func (s *DataStore) ListDeploymentsByLabels(matchLabels map[string]string) ([]*appsv1.Deployment, error) {
+	selector := labels.SelectorFromSet(matchLabels)
+	return s.deploymentLister.Deployments(s.namespace).List(selector)
 }
 
 // ListDeployment gets a list of all Deployment for the given namespace
 func (s *DataStore) ListDeployment() ([]*appsv1.Deployment, error) {
-	return s.dpLister.Deployments(s.namespace).List(labels.Everything())
+	return s.deploymentLister.Deployments(s.namespace).List(labels.Everything())
 }
 
 func (s *DataStore) ListDeploymentWithLabels(labels map[string]string) ([]*appsv1.Deployment, error) {
@@ -390,7 +414,7 @@ func (s *DataStore) ListDeploymentWithLabels(labels map[string]string) ([]*appsv
 	if err != nil {
 		return nil, err
 	}
-	return s.dpLister.Deployments(s.namespace).List(selector)
+	return s.deploymentLister.Deployments(s.namespace).List(selector)
 }
 
 // UpdateDeployment updates Deployment for the given Deployment object and namespace
@@ -417,6 +441,14 @@ func (s *DataStore) ListManagerPods() ([]*corev1.Pod, error) {
 		return nil, err
 	}
 	return s.ListPodsBySelector(selector)
+}
+
+func (s *DataStore) ListManagerPodsRO() ([]*corev1.Pod, error) {
+	selector, err := s.getManagerSelector()
+	if err != nil {
+		return nil, err
+	}
+	return s.ListPodsBySelectorRO(selector)
 }
 
 func getInstanceManagerComponentSelector() (labels.Selector, error) {
@@ -494,14 +526,27 @@ func (s *DataStore) GetSupportBundleManagerPod(supportBundle *longhorn.SupportBu
 }
 
 func (s *DataStore) ListPodsBySelector(selector labels.Selector) ([]*corev1.Pod, error) {
-	podList, err := s.pLister.Pods(s.namespace).List(selector)
+	podList, err := s.podLister.Pods(s.namespace).List(selector)
 	if err != nil {
 		return nil, err
 	}
 
-	res := []*corev1.Pod{}
-	for _, item := range podList {
-		res = append(res, item.DeepCopy())
+	res := make([]*corev1.Pod, len(podList))
+	for idx, item := range podList {
+		res[idx] = item.DeepCopy()
+	}
+	return res, nil
+}
+
+func (s *DataStore) ListPodsBySelectorRO(selector labels.Selector) ([]*corev1.Pod, error) {
+	podList, err := s.podLister.Pods(s.namespace).List(selector)
+	if err != nil {
+		return nil, err
+	}
+
+	res := make([]*corev1.Pod, len(podList))
+	for idx, item := range podList {
+		res[idx] = item
 	}
 	return res, nil
 }
@@ -510,18 +555,18 @@ func (s *DataStore) ListPodsBySelector(selector labels.Selector) ([]*corev1.Pod,
 // the list contains direct references to the internal cache objects and should not be mutated.
 // Consider using this function when you can guarantee read only access and don't want the overhead of deep copies
 func (s *DataStore) ListKubeNodesRO() ([]*corev1.Node, error) {
-	return s.knLister.List(labels.Everything())
+	return s.kubeNodeLister.List(labels.Everything())
 }
 
-// GetKubernetesNode gets the Node from the index for the given name
-func (s *DataStore) GetKubernetesNode(name string) (*corev1.Node, error) {
-	return s.knLister.Get(name)
+// GetKubernetesNodeRO gets the Node from the index for the given name
+func (s *DataStore) GetKubernetesNodeRO(name string) (*corev1.Node, error) {
+	return s.kubeNodeLister.Get(name)
 }
 
 // IsKubeNodeUnschedulable checks if the Kubernetes Node resource is
 // unschedulable
 func (s *DataStore) IsKubeNodeUnschedulable(nodeName string) (bool, error) {
-	kubeNode, err := s.GetKubernetesNode(nodeName)
+	kubeNode, err := s.GetKubernetesNodeRO(nodeName)
 	if err != nil {
 		return false, err
 	}
@@ -551,12 +596,12 @@ func (s *DataStore) UpdatePersistentVolume(pv *corev1.PersistentVolume) (*corev1
 // This function returns direct reference to the internal cache object and should not be mutated.
 // Consider using this function when you can guarantee read only access and don't want the overhead of deep copies
 func (s *DataStore) GetPersistentVolumeRO(pvName string) (*corev1.PersistentVolume, error) {
-	return s.pvLister.Get(pvName)
+	return s.persistentVolumeLister.Get(pvName)
 }
 
 // GetPersistentVolume gets a mutable PersistentVolume for the given name
 func (s *DataStore) GetPersistentVolume(pvName string) (*corev1.PersistentVolume, error) {
-	resultRO, err := s.pvLister.Get(pvName)
+	resultRO, err := s.persistentVolumeLister.Get(pvName)
 	if err != nil {
 		return nil, err
 	}
@@ -568,7 +613,7 @@ func (s *DataStore) GetPersistentVolume(pvName string) (*corev1.PersistentVolume
 // This function returns direct reference to the internal cache object and should not be mutated.
 // Consider using this function when you can guarantee read only access and don't want the overhead of deep copies
 func (s *DataStore) ListPersistentVolumesRO() ([]*corev1.PersistentVolume, error) {
-	return s.pvLister.List(labels.Everything())
+	return s.persistentVolumeLister.List(labels.Everything())
 }
 
 // CreatePersistentVolumeClaim creates a PersistentVolumeClaim resource
@@ -594,12 +639,12 @@ func (s *DataStore) UpdatePersistentVolumeClaim(namespace string, pvc *corev1.Pe
 // This function returns direct reference to the internal cache object and should not be mutated.
 // Consider using this function when you can guarantee read only access and don't want the overhead of deep copies
 func (s *DataStore) GetPersistentVolumeClaimRO(namespace, pvcName string) (*corev1.PersistentVolumeClaim, error) {
-	return s.pvcLister.PersistentVolumeClaims(namespace).Get(pvcName)
+	return s.persistentVolumeClaimLister.PersistentVolumeClaims(namespace).Get(pvcName)
 }
 
 // GetPersistentVolumeClaim gets a mutable PersistentVolumeClaim for the given name and namespace
 func (s *DataStore) GetPersistentVolumeClaim(namespace, pvcName string) (*corev1.PersistentVolumeClaim, error) {
-	resultRO, err := s.pvcLister.PersistentVolumeClaims(namespace).Get(pvcName)
+	resultRO, err := s.persistentVolumeClaimLister.PersistentVolumeClaims(namespace).Get(pvcName)
 	if err != nil {
 		return nil, err
 	}
@@ -611,7 +656,7 @@ func (s *DataStore) GetPersistentVolumeClaim(namespace, pvcName string) (*corev1
 // This function returns direct reference to the internal cache object and should not be mutated.
 // Consider using this function when you can guarantee read only access and don't want the overhead of deep copies
 func (s *DataStore) ListVolumeAttachmentsRO() ([]*storagev1.VolumeAttachment, error) {
-	return s.vaLister.List(labels.Everything())
+	return s.volumeAttachmentLister.List(labels.Everything())
 }
 
 // CreateConfigMap creates a ConfigMap resource
@@ -628,12 +673,19 @@ func (s *DataStore) UpdateConfigMap(configMap *corev1.ConfigMap) (*corev1.Config
 // This function returns direct reference to the internal cache object and should not be mutated.
 // Consider using this function when you can guarantee read only access and don't want the overhead of deep copies
 func (s *DataStore) GetConfigMapRO(namespace, name string) (*corev1.ConfigMap, error) {
-	return s.cfmLister.ConfigMaps(namespace).Get(name)
+	if namespace == s.namespace {
+		return s.configMapLister.ConfigMaps(namespace).Get(name)
+	}
+	return s.kubeClient.CoreV1().ConfigMaps(namespace).Get(context.Background(), name, metav1.GetOptions{})
 }
 
 // GetConfigMap return a new ConfigMap object for the given namespace and name
-func (s *DataStore) GetConfigMap(namespace, name string) (*corev1.ConfigMap, error) {
-	resultRO, err := s.cfmLister.ConfigMaps(namespace).Get(name)
+func (s *DataStore) GetConfigMap(namespace, name string) (resultRO *corev1.ConfigMap, err error) {
+	if namespace == s.namespace {
+		resultRO, err = s.configMapLister.ConfigMaps(namespace).Get(name)
+	} else {
+		resultRO, err = s.kubeClient.CoreV1().ConfigMaps(namespace).Get(context.Background(), name, metav1.GetOptions{})
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -650,16 +702,40 @@ func (s *DataStore) DeleteConfigMap(namespace, name string) error {
 	return nil
 }
 
+// CreateSecret creates Secret with the given object
+func (s *DataStore) CreateSecret(namespace string, obj *corev1.Secret) (*corev1.Secret, error) {
+	return s.kubeClient.CoreV1().Secrets(namespace).Create(context.TODO(), obj, metav1.CreateOptions{})
+}
+
+// ListSecretsByLabels returns a list of secrets in the given namespace matching
+// the labels given in the labels map
+func (s *DataStore) ListSecretsByLabels(namespace string, labelMap map[string]string) ([]*corev1.Secret, error) {
+	selector := labels.SelectorFromSet(labels.Set(labelMap))
+	return s.secretLister.Secrets(namespace).List(selector)
+}
+
+// ListSecret retrieves a list of all Secret objects in the given namespace
+func (s *DataStore) ListSecret(namespace string) ([]*corev1.Secret, error) {
+	return s.secretLister.Secrets(namespace).List(labels.Everything())
+}
+
 // GetSecretRO gets Secret with the given namespace and name
 // This function returns direct reference to the internal cache object and should not be mutated.
 // Consider using this function when you can guarantee read only access and don't want the overhead of deep copies
 func (s *DataStore) GetSecretRO(namespace, name string) (*corev1.Secret, error) {
-	return s.secretLister.Secrets(namespace).Get(name)
+	if namespace == s.namespace {
+		return s.secretLister.Secrets(namespace).Get(name)
+	}
+	return s.kubeClient.CoreV1().Secrets(namespace).Get(context.Background(), name, metav1.GetOptions{})
 }
 
 // GetSecret return a new Secret object with the given namespace and name
-func (s *DataStore) GetSecret(namespace, name string) (*corev1.Secret, error) {
-	resultRO, err := s.secretLister.Secrets(namespace).Get(name)
+func (s *DataStore) GetSecret(namespace, name string) (resultRO *corev1.Secret, err error) {
+	if namespace == s.namespace {
+		resultRO, err = s.secretLister.Secrets(namespace).Get(name)
+	} else {
+		resultRO, err = s.kubeClient.CoreV1().Secrets(namespace).Get(context.Background(), name, metav1.GetOptions{})
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -667,10 +743,24 @@ func (s *DataStore) GetSecret(namespace, name string) (*corev1.Secret, error) {
 	return resultRO.DeepCopy(), nil
 }
 
+// UpdateSecret updates the Secret resource with the given object and namespace
+func (s *DataStore) UpdateSecret(namespace string, secret *corev1.Secret) (*corev1.Secret, error) {
+	return s.kubeClient.CoreV1().Secrets(namespace).Update(context.TODO(), secret, metav1.UpdateOptions{})
+}
+
+// DeleteSecret deletes the named Secret from the namespace
+func (s *DataStore) DeleteSecret(namespace string, name string) error {
+	err := s.kubeClient.CoreV1().Secrets(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
+	if err != nil && apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
 // GetPriorityClass gets the PriorityClass from the index for the
 // given name
 func (s *DataStore) GetPriorityClass(pcName string) (*schedulingv1.PriorityClass, error) {
-	return s.pcLister.Get(pcName)
+	return s.priorityClassLister.Get(pcName)
 }
 
 // GetPodContainerLogRequest returns the Pod log for the given pod name,
@@ -693,9 +783,23 @@ func (s *DataStore) CreateService(ns string, service *corev1.Service) (*corev1.S
 	return s.kubeClient.CoreV1().Services(ns).Create(context.TODO(), service, metav1.CreateOptions{})
 }
 
-// GetService gets the Service for the given name and namespace
+// GetServiceRO gets the Service for the given name and namespace, but needs the
+// caller to guarantee that no modifications take place on the object
+func (s *DataStore) GetServiceRO(namespace, name string) (*corev1.Service, error) {
+	if namespace == s.namespace {
+		return s.serviceLister.Services(namespace).Get(name)
+	}
+	return s.kubeClient.CoreV1().Services(namespace).Get(context.Background(), name, metav1.GetOptions{})
+}
+
+// GetService returns a copy of the current service with namespace/name in the
+// datastore.
 func (s *DataStore) GetService(namespace, name string) (*corev1.Service, error) {
-	return s.svLister.Services(namespace).Get(name)
+	svc, err := s.GetServiceRO(namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	return svc.DeepCopy(), nil
 }
 
 // DeleteService deletes the Service for the given name and namespace
@@ -827,7 +931,7 @@ func NewPVCManifest(size int64, pvName, ns, pvcName, storageClassName string, ac
 //	  	  "dns": {}
 //	    }]
 func (s *DataStore) GetStorageIPFromPod(pod *corev1.Pod) string {
-	storageNetwork, err := s.GetSetting(types.SettingNameStorageNetwork)
+	storageNetwork, err := s.GetSettingWithAutoFillingRO(types.SettingNameStorageNetwork)
 	if err != nil {
 		logrus.Warnf("Failed to get %v setting, use %v pod IP %v", types.SettingNameStorageNetwork, pod.Name, pod.Status.PodIP)
 		return pod.Status.PodIP
@@ -838,10 +942,18 @@ func (s *DataStore) GetStorageIPFromPod(pod *corev1.Pod) string {
 		return pod.Status.PodIP
 	}
 
+	// Check if the network-status annotation exists.
 	status, ok := pod.Annotations[string(types.CNIAnnotationNetworkStatus)]
 	if !ok {
-		logrus.Warnf("Missing %v annotation, use %v pod IP %v", types.CNIAnnotationNetworkStatus, pod.Name, pod.Status.PodIP)
-		return pod.Status.PodIP
+		// If the network-status annotation is missing, check the deprecated annotation.
+		logrus.Debugf("Missing %v annotation, checking deprecated %v annotation", types.CNIAnnotationNetworkStatus, types.CNIAnnotationNetworksStatus)
+		status, ok = pod.Annotations[string(types.CNIAnnotationNetworksStatus)]
+
+		// If the deprecated annotation is also missing, use the pod IP.
+		if !ok {
+			logrus.Warnf("Missing %v annotation, use %v pod IP %v", types.CNIAnnotationNetworkStatus, pod.Name, pod.Status.PodIP)
+			return pod.Status.PodIP
+		}
 	}
 
 	nets := []types.CniNetwork{}
@@ -997,4 +1109,37 @@ func (s *DataStore) GetRoleBinding(name string) (*rbacv1.RoleBinding, error) {
 // UpdateRoleBinding updates the RoleBinding resource with the given RoleBinding object in the Longhorn namespace
 func (s *DataStore) UpdateRoleBinding(roleBinding *rbacv1.RoleBinding) (*rbacv1.RoleBinding, error) {
 	return s.kubeClient.RbacV1().RoleBindings(s.namespace).Update(context.TODO(), roleBinding, metav1.UpdateOptions{})
+}
+
+func (s *DataStore) ListStorageClasses() (map[string]*storagev1.StorageClass, error) {
+	list, err := s.storageclassLister.List(labels.Everything())
+	if err != nil {
+		return nil, err
+	}
+
+	itemMap := map[string]*storagev1.StorageClass{}
+	for _, itemRO := range list {
+		// Cannot use cached object from lister
+		itemMap[itemRO.Name] = itemRO.DeepCopy()
+	}
+	return itemMap, nil
+}
+
+func (s *DataStore) GetOwnerReferencesForPVC(pvc *corev1.PersistentVolumeClaim) []metav1.OwnerReference {
+	return []metav1.OwnerReference{
+		{
+			APIVersion: corev1.SchemeGroupVersion.String(),
+			Kind:       "PersistentVolumeClaim",
+			Name:       pvc.Name,
+			UID:        pvc.UID,
+		},
+	}
+}
+
+func (s *DataStore) CreateIngress(namespace string, ingress *networkingv1.Ingress) (*networkingv1.Ingress, error) {
+	return s.kubeClient.NetworkingV1().Ingresses(namespace).Create(context.TODO(), ingress, metav1.CreateOptions{})
+}
+
+func (s *DataStore) GetIngress(namespace, name string) (*networkingv1.Ingress, error) {
+	return s.kubeClient.NetworkingV1().Ingresses(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 }

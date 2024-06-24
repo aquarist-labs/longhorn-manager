@@ -8,18 +8,19 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
-	clientset "k8s.io/client-go/kubernetes"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/controller"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	"github.com/longhorn/backupstore"
 
@@ -73,7 +74,7 @@ func NewBackupVolumeController(
 		ds: ds,
 
 		kubeClient:    kubeClient,
-		eventRecorder: eventBroadcaster.NewRecorder(scheme, v1.EventSource{Component: "longhorn-backup-volume-controller"}),
+		eventRecorder: eventBroadcaster.NewRecorder(scheme, corev1.EventSource{Component: "longhorn-backup-volume-controller"}),
 
 		proxyConnCounter: proxyConnCounter,
 	}
@@ -152,14 +153,15 @@ func (bvc *BackupVolumeController) handleErr(err error, key interface{}) {
 		return
 	}
 
+	log := bvc.logger.WithField("BackupVolume", key)
 	if bvc.queue.NumRequeues(key) < maxRetries {
-		bvc.logger.WithError(err).Errorf("Failed to sync Longhorn backup volume %v", key)
+		handleReconcileErrorLogging(log, err, "Failed to sync Longhorn backup volume")
 		bvc.queue.AddRateLimited(key)
 		return
 	}
 
 	utilruntime.HandleError(err)
-	bvc.logger.WithError(err).Errorf("Dropping Longhorn backup volume %v out of the queue", key)
+	handleReconcileErrorLogging(log, err, "Dropping Longhorn backup volume out of the queue")
 	bvc.queue.Forget(key)
 }
 
@@ -321,8 +323,10 @@ func (bvc *BackupVolumeController) reconcile(backupVolumeName string) (err error
 				"backupvolume": backupVolumeName,
 				"backuptarget": backupURL}).Warn("Failed to get backupInfo from remote backup target")
 		} else {
-			if accessMode, exist := backupInfo.Labels[types.GetLonghornLabelKey(types.LonghornLabelVolumeAccessMode)]; exist {
-				backupLabelMap[types.GetLonghornLabelKey(types.LonghornLabelVolumeAccessMode)] = accessMode
+			if backupInfo != nil && backupInfo.Labels != nil {
+				if accessMode, exist := backupInfo.Labels[types.GetLonghornLabelKey(types.LonghornLabelVolumeAccessMode)]; exist {
+					backupLabelMap[types.GetLonghornLabelKey(types.LonghornLabelVolumeAccessMode)] = accessMode
+				}
 			}
 		}
 

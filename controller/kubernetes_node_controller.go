@@ -9,16 +9,17 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	clientset "k8s.io/client-go/kubernetes"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/controller"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/types"
@@ -57,7 +58,7 @@ func NewKubernetesNodeController(
 		controllerID: controllerID,
 
 		kubeClient:    kubeClient,
-		eventRecorder: eventBroadcaster.NewRecorder(scheme, v1.EventSource{Component: "longhorn-kubernetes-node-controller"}),
+		eventRecorder: eventBroadcaster.NewRecorder(scheme, corev1.EventSource{Component: "longhorn-kubernetes-node-controller"}),
 
 		ds: ds,
 	}
@@ -149,14 +150,15 @@ func (knc *KubernetesNodeController) handleErr(err error, key interface{}) {
 		return
 	}
 
+	log := knc.logger.WithField("KubernetesNode", key)
 	if knc.queue.NumRequeues(key) < maxRetries {
-		logrus.WithError(err).Errorf("Failed to sync Longhorn node %v", key)
+		handleReconcileErrorLogging(log, err, "Failed to sync Kubernetes node")
 		knc.queue.AddRateLimited(key)
 		return
 	}
 
 	utilruntime.HandleError(err)
-	logrus.WithError(err).Errorf("Dropping Longhorn node %v out of the queue", key)
+	handleReconcileErrorLogging(log, err, "Dropping Kubernetes node out of the queue")
 	knc.queue.Forget(key)
 }
 
@@ -169,7 +171,7 @@ func (knc *KubernetesNodeController) syncKubernetesNode(key string) (err error) 
 		return err
 	}
 
-	kubeNode, err := knc.ds.GetKubernetesNode(name)
+	kubeNode, err := knc.ds.GetKubernetesNodeRO(name)
 	if err != nil {
 		if !datastore.ErrorIsNotFound(err) {
 			return err
@@ -222,7 +224,7 @@ func (knc *KubernetesNodeController) syncKubernetesNode(key string) (err error) 
 }
 
 func (knc *KubernetesNodeController) enqueueSetting(obj interface{}) {
-	node, err := knc.ds.GetKubernetesNode(knc.controllerID)
+	node, err := knc.ds.GetKubernetesNodeRO(knc.controllerID)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("couldn't get kubernetes node %v: %v ", knc.controllerID, err))
 		return
@@ -275,7 +277,7 @@ func (knc *KubernetesNodeController) syncDefaultDisks(node *longhorn.Node) (err 
 	if len(node.Spec.Disks) != 0 {
 		return nil
 	}
-	kubeNode, err := knc.ds.GetKubernetesNode(node.Name)
+	kubeNode, err := knc.ds.GetKubernetesNodeRO(node.Name)
 	if err != nil {
 		return err
 	}
@@ -329,7 +331,7 @@ func (knc *KubernetesNodeController) syncDefaultNodeTags(node *longhorn.Node) er
 		return nil
 	}
 
-	kubeNode, err := knc.ds.GetKubernetesNode(node.Name)
+	kubeNode, err := knc.ds.GetKubernetesNodeRO(node.Name)
 	if err != nil {
 		return err
 	}

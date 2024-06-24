@@ -11,24 +11,27 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	clientset "k8s.io/client-go/kubernetes"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/controller"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
+
 	"github.com/longhorn/longhorn-manager/csi"
 	"github.com/longhorn/longhorn-manager/csi/crypto"
 	"github.com/longhorn/longhorn-manager/datastore"
-	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
+	"github.com/longhorn/longhorn-manager/engineapi"
 	"github.com/longhorn/longhorn-manager/types"
 	"github.com/longhorn/longhorn-manager/util"
+
+	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 )
 
 type ShareManagerController struct {
@@ -70,7 +73,7 @@ func NewShareManagerController(
 		serviceAccount: serviceAccount,
 
 		kubeClient:    kubeClient,
-		eventRecorder: eventBroadcaster.NewRecorder(scheme, v1.EventSource{Component: "longhorn-share-manager-controller"}),
+		eventRecorder: eventBroadcaster.NewRecorder(scheme, corev1.EventSource{Component: "longhorn-share-manager-controller"}),
 
 		ds: ds,
 	}
@@ -153,7 +156,7 @@ func (c *ShareManagerController) enqueueShareManagerForVolume(obj interface{}) {
 }
 
 func (c *ShareManagerController) enqueueShareManagerForPod(obj interface{}) {
-	pod, isPod := obj.(*v1.Pod)
+	pod, isPod := obj.(*corev1.Pod)
 	if !isPod {
 		deletedState, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
@@ -162,7 +165,7 @@ func (c *ShareManagerController) enqueueShareManagerForPod(obj interface{}) {
 		}
 
 		// use the last known state, to enqueue the ShareManager
-		pod, ok = deletedState.Obj.(*v1.Pod)
+		pod, ok = deletedState.Obj.(*corev1.Pod)
 		if !ok {
 			utilruntime.HandleError(fmt.Errorf("DeletedFinalStateUnknown contained non Pod object: %#v", deletedState.Obj))
 			return
@@ -178,7 +181,7 @@ func (c *ShareManagerController) enqueueShareManagerForPod(obj interface{}) {
 }
 
 func isShareManagerPod(obj interface{}) bool {
-	pod, ok := obj.(*v1.Pod)
+	pod, ok := obj.(*corev1.Pod)
 	if !ok {
 		deletedState, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
@@ -186,7 +189,7 @@ func isShareManagerPod(obj interface{}) bool {
 		}
 
 		// use the last known state, to enqueue, dependent objects
-		pod, ok = deletedState.Obj.(*v1.Pod)
+		pod, ok = deletedState.Obj.(*corev1.Pod)
 		if !ok {
 			return false
 		}
@@ -239,13 +242,14 @@ func (c *ShareManagerController) handleErr(err error, key interface{}) {
 		return
 	}
 
+	log := c.logger.WithField("ShareManager", key)
 	if c.queue.NumRequeues(key) < maxRetries {
-		c.logger.WithError(err).Errorf("Failed to sync Longhorn share manager %v", key)
+		handleReconcileErrorLogging(log, err, "Failed to sync Longhorn share manager")
 		c.queue.AddRateLimited(key)
 		return
 	}
 
-	c.logger.WithError(err).Errorf("Dropping Longhorn share manager %v out of the queue", key)
+	handleReconcileErrorLogging(log, err, "Dropping Longhorn share manager out of the queue")
 	c.queue.Forget(key)
 	utilruntime.HandleError(err)
 }
@@ -354,7 +358,7 @@ func (c *ShareManagerController) syncShareManagerEndpoint(sm *longhorn.ShareMana
 		return nil
 	}
 	endpoint := service.Spec.ClusterIP
-	if service.Spec.IPFamilies[0] == v1.IPv6Protocol {
+	if service.Spec.IPFamilies[0] == corev1.IPv6Protocol {
 		endpoint = fmt.Sprintf("[%v]", endpoint)
 	}
 
@@ -364,7 +368,7 @@ func (c *ShareManagerController) syncShareManagerEndpoint(sm *longhorn.ShareMana
 
 // isShareManagerRequiredForVolume checks if a share manager should export a volume
 // a nil volume does not require a share manager
-func (c *ShareManagerController) isShareManagerRequiredForVolume(volume *longhorn.Volume, va *longhorn.VolumeAttachment) bool {
+func (c *ShareManagerController) isShareManagerRequiredForVolume(sm *longhorn.ShareManager, volume *longhorn.Volume, va *longhorn.VolumeAttachment) bool {
 	if volume == nil {
 		return false
 	}
@@ -406,7 +410,7 @@ func (c *ShareManagerController) createShareManagerAttachmentTicket(sm *longhorn
 	shareManagerAttachmentTicketID := longhorn.GetAttachmentTicketID(longhorn.AttacherTypeShareManagerController, sm.Name)
 	shareManagerAttachmentTicket, ok := va.Spec.AttachmentTickets[shareManagerAttachmentTicketID]
 	if !ok {
-		//create new one
+		// create new one
 		shareManagerAttachmentTicket = &longhorn.AttachmentTicket{
 			ID:     shareManagerAttachmentTicketID,
 			Type:   longhorn.AttacherTypeShareManagerController,
@@ -417,19 +421,76 @@ func (c *ShareManagerController) createShareManagerAttachmentTicket(sm *longhorn
 		}
 	}
 	if shareManagerAttachmentTicket.NodeID != sm.Status.OwnerID {
-		log.Infof("Attachment ticket %v request a new node %v from old node %v", shareManagerAttachmentTicket.ID, shareManagerAttachmentTicket.NodeID, sm.Status.OwnerID)
+		log.Infof("Attachment ticket %v request a new node %v from old node %v", shareManagerAttachmentTicket.ID, sm.Status.OwnerID, shareManagerAttachmentTicket.NodeID)
 		shareManagerAttachmentTicket.NodeID = sm.Status.OwnerID
 	}
 
 	va.Spec.AttachmentTickets[shareManagerAttachmentTicketID] = shareManagerAttachmentTicket
 }
 
+// unmountShareManagerVolume unmounts the volume in the share manager pod.
+// It is a best effort operation and will not return an error if it fails.
+func (c *ShareManagerController) unmountShareManagerVolume(sm *longhorn.ShareManager) {
+	log := getLoggerForShareManager(c.logger, sm)
+
+	podName := types.GetShareManagerPodNameFromShareManagerName(sm.Name)
+	pod, err := c.ds.GetPod(podName)
+	if err != nil && !apierrors.IsNotFound(err) {
+		log.WithError(err).Errorf("Failed to retrieve pod %v for share manager from datastore", podName)
+		return
+	}
+
+	if pod == nil {
+		return
+	}
+
+	log.Infof("Unmounting volume in share manager pod")
+
+	client, err := engineapi.NewShareManagerClient(sm, pod)
+	if err != nil {
+		log.WithError(err).Errorf("Failed to create share manager client for pod %v", podName)
+		return
+	}
+	defer client.Close()
+
+	if err := client.Unmount(); err != nil {
+		log.WithError(err).Warnf("Failed to unmount share manager pod %v", podName)
+	}
+}
+
+// mountShareManagerVolume checks, exports and mounts the volume in the share manager pod.
+func (c *ShareManagerController) mountShareManagerVolume(sm *longhorn.ShareManager) error {
+	podName := types.GetShareManagerPodNameFromShareManagerName(sm.Name)
+	pod, err := c.ds.GetPod(podName)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return errors.Wrapf(err, "failed to retrieve pod %v for share manager from datastore", podName)
+	}
+
+	if pod == nil {
+		return fmt.Errorf("pod %v for share manager not found", podName)
+	}
+
+	client, err := engineapi.NewShareManagerClient(sm, pod)
+	if err != nil {
+		return errors.Wrapf(err, "failed to create share manager client for pod %v", podName)
+	}
+	defer client.Close()
+
+	if err := client.Mount(); err != nil {
+		return errors.Wrapf(err, "failed to mount share manager pod %v", podName)
+	}
+
+	return nil
+}
+
 func (c *ShareManagerController) detachShareManagerVolume(sm *longhorn.ShareManager, va *longhorn.VolumeAttachment) {
 	log := getLoggerForShareManager(c.logger, sm)
 
 	shareManagerAttachmentTicketID := longhorn.GetAttachmentTicketID(longhorn.AttacherTypeShareManagerController, sm.Name)
-	log.Infof("Removing volume attachment ticket: %v to detach the volume %v", shareManagerAttachmentTicketID, va.Name)
-	delete(va.Spec.AttachmentTickets, shareManagerAttachmentTicketID)
+	if _, ok := va.Spec.AttachmentTickets[shareManagerAttachmentTicketID]; ok {
+		log.Infof("Removing volume attachment ticket: %v to detach the volume %v", shareManagerAttachmentTicketID, va.Name)
+		delete(va.Spec.AttachmentTickets, shareManagerAttachmentTicketID)
+	}
 }
 
 // syncShareManagerVolume controls volume attachment and provides the following state transitions
@@ -470,7 +531,9 @@ func (c *ShareManagerController) syncShareManagerVolume(sm *longhorn.ShareManage
 		}
 	}()
 
-	if !c.isShareManagerRequiredForVolume(volume, va) {
+	if !c.isShareManagerRequiredForVolume(sm, volume, va) {
+		c.unmountShareManagerVolume(sm)
+
 		c.detachShareManagerVolume(sm, va)
 		if sm.Status.State != longhorn.ShareManagerStateStopped {
 			log.Info("Stopping share manager since it is no longer required")
@@ -478,6 +541,11 @@ func (c *ShareManagerController) syncShareManagerVolume(sm *longhorn.ShareManage
 		}
 		return nil
 	} else if sm.Status.State == longhorn.ShareManagerStateRunning {
+		err := c.mountShareManagerVolume(sm)
+		if err != nil {
+			log.WithError(err).Error("Failed to mount share manager volume")
+			sm.Status.State = longhorn.ShareManagerStateError
+		}
 		return nil
 	}
 
@@ -486,6 +554,8 @@ func (c *ShareManagerController) syncShareManagerVolume(sm *longhorn.ShareManage
 	// we only check for running, since we don't want to nuke valid pods, not schedulable only means no new pods.
 	// in the case of a drain kubernetes will terminate the running pod, which we will mark as error in the sync pod method
 	if !c.ds.IsNodeSchedulable(sm.Status.OwnerID) {
+		c.unmountShareManagerVolume(sm)
+
 		c.detachShareManagerVolume(sm, va)
 		if sm.Status.State != longhorn.ShareManagerStateStopped {
 			log.Info("Failed to start share manager, node is not schedulable")
@@ -528,6 +598,7 @@ func (c *ShareManagerController) cleanupShareManagerPod(sm *longhorn.ShareManage
 		return nil
 	}
 
+	log.Infof("Deleting share manager pod")
 	if err := c.ds.DeletePod(podName); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
@@ -620,12 +691,12 @@ func (c *ShareManagerController) syncShareManagerPod(sm *longhorn.ShareManager) 
 	}
 
 	switch pod.Status.Phase {
-	case v1.PodPending:
+	case corev1.PodPending:
 		if sm.Status.State != longhorn.ShareManagerStateStarting {
 			log.Warnf("Share Manager has state %v but the related pod is pending.", sm.Status.State)
 			sm.Status.State = longhorn.ShareManagerStateError
 		}
-	case v1.PodRunning:
+	case corev1.PodRunning:
 		// pod readiness is based on the availability of the nfs server
 		// nfs server is only started after the volume is attached and mounted
 		allContainersReady := true
@@ -648,14 +719,10 @@ func (c *ShareManagerController) syncShareManagerPod(sm *longhorn.ShareManager) 
 }
 
 // createShareManagerPod ensures existence of service, it's assumed that the pvc for this share manager already exists
-func (c *ShareManagerController) createShareManagerPod(sm *longhorn.ShareManager) (*v1.Pod, error) {
-	setting, err := c.ds.GetSetting(types.SettingNameTaintToleration)
+func (c *ShareManagerController) createShareManagerPod(sm *longhorn.ShareManager) (*corev1.Pod, error) {
+	tolerations, err := c.ds.GetSettingTaintToleration()
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get taint toleration setting before creating share manager pod")
-	}
-	tolerations, err := types.UnmarshalTolerations(setting.Value)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to unmarshal taint toleration setting before creating share manager pod")
 	}
 	nodeSelector, err := c.ds.GetSettingSystemManagedComponentsNodeSelector()
 	if err != nil {
@@ -673,13 +740,13 @@ func (c *ShareManagerController) createShareManagerPod(sm *longhorn.ShareManager
 		return nil, errors.Wrap(err, "failed to get image pull policy before creating share manager pod")
 	}
 
-	setting, err = c.ds.GetSetting(types.SettingNameRegistrySecret)
+	setting, err := c.ds.GetSettingWithAutoFillingRO(types.SettingNameRegistrySecret)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get registry secret setting before creating share manager pod")
 	}
 	registrySecret := setting.Value
 
-	setting, err = c.ds.GetSetting(types.SettingNamePriorityClass)
+	setting, err = c.ds.GetSettingWithAutoFillingRO(types.SettingNamePriorityClass)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get priority class setting before creating share manager pod")
 	}
@@ -740,23 +807,23 @@ func (c *ShareManagerController) createShareManagerPod(sm *longhorn.ShareManager
 	return pod, nil
 }
 
-func (c *ShareManagerController) createServiceManifest(sm *longhorn.ShareManager) *v1.Service {
-	service := &v1.Service{
+func (c *ShareManagerController) createServiceManifest(sm *longhorn.ShareManager) *corev1.Service {
+	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            sm.Name,
 			Namespace:       c.namespace,
 			OwnerReferences: datastore.GetOwnerReferencesForShareManager(sm, false),
 			Labels:          types.GetShareManagerInstanceLabel(sm.Name),
 		},
-		Spec: v1.ServiceSpec{
+		Spec: corev1.ServiceSpec{
 			ClusterIP: "", // we let the cluster assign a random ip
-			Type:      v1.ServiceTypeClusterIP,
+			Type:      corev1.ServiceTypeClusterIP,
 			Selector:  types.GetShareManagerInstanceLabel(sm.Name),
-			Ports: []v1.ServicePort{
+			Ports: []corev1.ServicePort{
 				{
 					Name:     "nfs",
 					Port:     2049,
-					Protocol: v1.ProtocolTCP,
+					Protocol: corev1.ProtocolTCP,
 				},
 			},
 		},
@@ -765,9 +832,9 @@ func (c *ShareManagerController) createServiceManifest(sm *longhorn.ShareManager
 	return service
 }
 
-func (c *ShareManagerController) createPodManifest(sm *longhorn.ShareManager, annotations map[string]string, tolerations []v1.Toleration,
-	pullPolicy v1.PullPolicy, resourceReq *v1.ResourceRequirements, registrySecret, priorityClass string, nodeSelector map[string]string,
-	fsType string, mountOptions []string, cryptoKey string, cryptoParams *crypto.EncryptParams) *v1.Pod {
+func (c *ShareManagerController) createPodManifest(sm *longhorn.ShareManager, annotations map[string]string, tolerations []corev1.Toleration,
+	pullPolicy corev1.PullPolicy, resourceReq *corev1.ResourceRequirements, registrySecret, priorityClass string, nodeSelector map[string]string,
+	fsType string, mountOptions []string, cryptoKey string, cryptoParams *crypto.EncryptParams) *corev1.Pod {
 
 	// command args for the share-manager
 	args := []string{"--debug", "daemon", "--volume", sm.Name}
@@ -781,7 +848,7 @@ func (c *ShareManagerController) createPodManifest(sm *longhorn.ShareManager, an
 	}
 
 	privileged := true
-	podSpec := &v1.Pod{
+	podSpec := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            types.GetShareManagerPodNameFromShareManagerName(sm.Name),
 			Namespace:       sm.Namespace,
@@ -789,21 +856,21 @@ func (c *ShareManagerController) createPodManifest(sm *longhorn.ShareManager, an
 			Annotations:     annotations,
 			OwnerReferences: datastore.GetOwnerReferencesForShareManager(sm, true),
 		},
-		Spec: v1.PodSpec{
+		Spec: corev1.PodSpec{
 			ServiceAccountName: c.serviceAccount,
 			Tolerations:        util.GetDistinctTolerations(tolerations),
 			NodeSelector:       nodeSelector,
 			PriorityClassName:  priorityClass,
-			Containers: []v1.Container{
+			Containers: []corev1.Container{
 				{
 					Name:            types.LonghornLabelShareManager,
 					Image:           sm.Spec.Image,
 					ImagePullPolicy: pullPolicy,
 					// Command: []string{"longhorn-share-manager"},
 					Args: args,
-					ReadinessProbe: &v1.Probe{
-						ProbeHandler: v1.ProbeHandler{
-							Exec: &v1.ExecAction{
+					ReadinessProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							Exec: &corev1.ExecAction{
 								Command: []string{"cat", "/var/run/ganesha.pid"},
 							},
 						},
@@ -812,18 +879,18 @@ func (c *ShareManagerController) createPodManifest(sm *longhorn.ShareManager, an
 						PeriodSeconds:       datastore.PodProbePeriodSeconds,
 						FailureThreshold:    datastore.PodLivenessProbeFailureThreshold,
 					},
-					SecurityContext: &v1.SecurityContext{
+					SecurityContext: &corev1.SecurityContext{
 						Privileged: &privileged,
 					},
 				},
 			},
-			RestartPolicy: v1.RestartPolicyNever,
+			RestartPolicy: corev1.RestartPolicyNever,
 		},
 	}
 
 	// this is an encrypted volume the cryptoKey is base64 encoded
 	if len(cryptoKey) > 0 {
-		podSpec.Spec.Containers[0].Env = []v1.EnvVar{
+		podSpec.Spec.Containers[0].Env = []corev1.EnvVar{
 			{
 				Name:  "ENCRYPTED",
 				Value: "True",
@@ -851,7 +918,7 @@ func (c *ShareManagerController) createPodManifest(sm *longhorn.ShareManager, an
 		}
 	}
 
-	podSpec.Spec.Containers[0].VolumeMounts = []v1.VolumeMount{
+	podSpec.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
 		{
 			Name:      "host-dev",
 			MountPath: "/dev",
@@ -871,35 +938,35 @@ func (c *ShareManagerController) createPodManifest(sm *longhorn.ShareManager, an
 		},
 	}
 
-	podSpec.Spec.Volumes = []v1.Volume{
+	podSpec.Spec.Volumes = []corev1.Volume{
 		{
 			Name: "host-dev",
-			VolumeSource: v1.VolumeSource{
-				HostPath: &v1.HostPathVolumeSource{
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
 					Path: "/dev",
 				},
 			},
 		},
 		{
 			Name: "host-sys",
-			VolumeSource: v1.VolumeSource{
-				HostPath: &v1.HostPathVolumeSource{
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
 					Path: "/sys",
 				},
 			},
 		},
 		{
 			Name: "host-proc",
-			VolumeSource: v1.VolumeSource{
-				HostPath: &v1.HostPathVolumeSource{
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
 					Path: "/proc",
 				},
 			},
 		},
 		{
 			Name: "lib-modules",
-			VolumeSource: v1.VolumeSource{
-				HostPath: &v1.HostPathVolumeSource{
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
 					Path: "/lib/modules",
 				},
 			},
@@ -907,7 +974,7 @@ func (c *ShareManagerController) createPodManifest(sm *longhorn.ShareManager, an
 	}
 
 	if registrySecret != "" {
-		podSpec.Spec.ImagePullSecrets = []v1.LocalObjectReference{
+		podSpec.Spec.ImagePullSecrets = []corev1.LocalObjectReference{
 			{
 				Name: registrySecret,
 			},
@@ -917,6 +984,7 @@ func (c *ShareManagerController) createPodManifest(sm *longhorn.ShareManager, an
 	if resourceReq != nil {
 		podSpec.Spec.Containers[0].Resources = *resourceReq
 	}
+	types.AddGoCoverDirToPod(podSpec)
 
 	return podSpec
 }
@@ -935,7 +1003,7 @@ func (c *ShareManagerController) isResponsibleFor(sm *longhorn.ShareManager) (bo
 
 	isResponsible := isControllerResponsibleFor(c.controllerID, c.ds, sm.Name, preferredOwnerID, sm.Status.OwnerID)
 
-	readyAndSchedulableNodes, err := c.ds.ListReadyAndSchedulableNodes()
+	readyAndSchedulableNodes, err := c.ds.ListReadyAndSchedulableNodesRO()
 	if err != nil {
 		return false, err
 	}

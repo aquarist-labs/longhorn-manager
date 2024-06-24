@@ -2,21 +2,20 @@ package csi
 
 import (
 	"fmt"
-	"sync"
 
 	"github.com/sirupsen/logrus"
 
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/pointer"
+
 	appsv1 "k8s.io/api/apps/v1"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/utils/pointer"
 
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/types"
-	"github.com/longhorn/longhorn-manager/util"
 )
 
 const (
@@ -46,19 +45,16 @@ const (
 )
 
 var (
-	HostPathDirectoryOrCreate     = v1.HostPathDirectoryOrCreate
-	MountPropagationBidirectional = v1.MountPropagationBidirectional
+	HostPathDirectoryOrCreate     = corev1.HostPathDirectoryOrCreate
+	MountPropagationBidirectional = corev1.MountPropagationBidirectional
 )
 
 type AttacherDeployment struct {
-	service    *v1.Service
 	deployment *appsv1.Deployment
 }
 
-func NewAttacherDeployment(namespace, serviceAccount, attacherImage, rootDir string, replicaCount int, tolerations []v1.Toleration,
-	tolerationsString, priorityClass, registrySecret string, imagePullPolicy v1.PullPolicy, nodeSelector map[string]string) *AttacherDeployment {
-
-	service := getCommonService(types.CSIAttacherName, namespace)
+func NewAttacherDeployment(namespace, serviceAccount, attacherImage, rootDir string, replicaCount int, tolerations []corev1.Toleration,
+	tolerationsString, priorityClass, registrySecret string, imagePullPolicy corev1.PullPolicy, nodeSelector map[string]string) *AttacherDeployment {
 
 	deployment := getCommonDeployment(
 		types.CSIAttacherName,
@@ -83,48 +79,28 @@ func NewAttacherDeployment(namespace, serviceAccount, attacherImage, rootDir str
 	)
 
 	return &AttacherDeployment{
-		service:    service,
 		deployment: deployment,
 	}
 }
 
 func (a *AttacherDeployment) Deploy(kubeClient *clientset.Clientset) error {
-	if err := deploy(kubeClient, a.service, "service",
-		serviceCreateFunc, serviceDeleteFunc, serviceGetFunc); err != nil {
-		return err
-	}
-
 	return deploy(kubeClient, a.deployment, "deployment",
 		deploymentCreateFunc, deploymentDeleteFunc, deploymentGetFunc)
 }
 
 func (a *AttacherDeployment) Cleanup(kubeClient *clientset.Clientset) {
-	var wg sync.WaitGroup
-	defer wg.Wait()
-
-	util.RunAsync(&wg, func() {
-		if err := cleanup(kubeClient, a.service, "service",
-			serviceDeleteFunc, serviceGetFunc); err != nil {
-			logrus.Warnf("Failed to cleanup service in attacher deployment: %v", err)
-		}
-	})
-	util.RunAsync(&wg, func() {
-		if err := cleanup(kubeClient, a.deployment, "deployment",
-			deploymentDeleteFunc, deploymentGetFunc); err != nil {
-			logrus.Warnf("Failed to cleanup deployment in attacher deployment: %v", err)
-		}
-	})
+	if err := cleanup(kubeClient, a.deployment, "deployment",
+		deploymentDeleteFunc, deploymentGetFunc); err != nil {
+		logrus.Warnf("Failed to cleanup deployment in attacher deployment: %v", err)
+	}
 }
 
 type ProvisionerDeployment struct {
-	service    *v1.Service
 	deployment *appsv1.Deployment
 }
 
-func NewProvisionerDeployment(namespace, serviceAccount, provisionerImage, rootDir string, replicaCount int, tolerations []v1.Toleration,
-	tolerationsString, priorityClass, registrySecret string, imagePullPolicy v1.PullPolicy, nodeSelector map[string]string) *ProvisionerDeployment {
-
-	service := getCommonService(types.CSIProvisionerName, namespace)
+func NewProvisionerDeployment(namespace, serviceAccount, provisionerImage, rootDir string, replicaCount int, tolerations []corev1.Toleration,
+	tolerationsString, priorityClass, registrySecret string, imagePullPolicy corev1.PullPolicy, nodeSelector map[string]string) *ProvisionerDeployment {
 
 	deployment := getCommonDeployment(
 		types.CSIProvisionerName,
@@ -150,48 +126,28 @@ func NewProvisionerDeployment(namespace, serviceAccount, provisionerImage, rootD
 	)
 
 	return &ProvisionerDeployment{
-		service:    service,
 		deployment: deployment,
 	}
 }
 
 func (p *ProvisionerDeployment) Deploy(kubeClient *clientset.Clientset) error {
-	if err := deploy(kubeClient, p.service, "service",
-		serviceCreateFunc, serviceDeleteFunc, serviceGetFunc); err != nil {
-		return err
-	}
-
 	return deploy(kubeClient, p.deployment, "deployment",
 		deploymentCreateFunc, deploymentDeleteFunc, deploymentGetFunc)
 }
 
 func (p *ProvisionerDeployment) Cleanup(kubeClient *clientset.Clientset) {
-	var wg sync.WaitGroup
-	defer wg.Wait()
-
-	util.RunAsync(&wg, func() {
-		if err := cleanup(kubeClient, p.service, "service",
-			serviceDeleteFunc, serviceGetFunc); err != nil {
-			logrus.Warnf("Failed to cleanup service in provisioner deployment: %v", err)
-		}
-	})
-	util.RunAsync(&wg, func() {
-		if err := cleanup(kubeClient, p.deployment, "deployment",
-			deploymentDeleteFunc, deploymentGetFunc); err != nil {
-			logrus.Warnf("Failed to cleanup deployment in provisioner deployment: %v", err)
-		}
-	})
+	if err := cleanup(kubeClient, p.deployment, "deployment",
+		deploymentDeleteFunc, deploymentGetFunc); err != nil {
+		logrus.WithError(err).Warn("Failed to cleanup deployment in provisioner deployment")
+	}
 }
 
 type ResizerDeployment struct {
-	service    *v1.Service
 	deployment *appsv1.Deployment
 }
 
-func NewResizerDeployment(namespace, serviceAccount, resizerImage, rootDir string, replicaCount int, tolerations []v1.Toleration,
-	tolerationsString, priorityClass, registrySecret string, imagePullPolicy v1.PullPolicy, nodeSelector map[string]string) *ResizerDeployment {
-
-	service := getCommonService(types.CSIResizerName, namespace)
+func NewResizerDeployment(namespace, serviceAccount, resizerImage, rootDir string, replicaCount int, tolerations []corev1.Toleration,
+	tolerationsString, priorityClass, registrySecret string, imagePullPolicy corev1.PullPolicy, nodeSelector map[string]string) *ResizerDeployment {
 
 	deployment := getCommonDeployment(
 		types.CSIResizerName,
@@ -220,47 +176,28 @@ func NewResizerDeployment(namespace, serviceAccount, resizerImage, rootDir strin
 	)
 
 	return &ResizerDeployment{
-		service:    service,
 		deployment: deployment,
 	}
 }
 
 func (p *ResizerDeployment) Deploy(kubeClient *clientset.Clientset) error {
-	if err := deploy(kubeClient, p.service, "service",
-		serviceCreateFunc, serviceDeleteFunc, serviceGetFunc); err != nil {
-		return err
-	}
-
 	return deploy(kubeClient, p.deployment, "deployment",
 		deploymentCreateFunc, deploymentDeleteFunc, deploymentGetFunc)
 }
 
 func (p *ResizerDeployment) Cleanup(kubeClient *clientset.Clientset) {
-	var wg sync.WaitGroup
-	defer wg.Wait()
-
-	util.RunAsync(&wg, func() {
-		if err := cleanup(kubeClient, p.service, "service",
-			serviceDeleteFunc, serviceGetFunc); err != nil {
-			logrus.Warnf("Failed to cleanup service in resizer deployment: %v", err)
-		}
-	})
-	util.RunAsync(&wg, func() {
-		if err := cleanup(kubeClient, p.deployment, "deployment",
-			deploymentDeleteFunc, deploymentGetFunc); err != nil {
-			logrus.Warnf("Failed to cleanup deployment in resizer deployment: %v", err)
-		}
-	})
+	if err := cleanup(kubeClient, p.deployment, "deployment",
+		deploymentDeleteFunc, deploymentGetFunc); err != nil {
+		logrus.WithError(err).Warn("Failed to cleanup deployment in resizer deployment")
+	}
 }
 
 type SnapshotterDeployment struct {
-	service    *v1.Service
 	deployment *appsv1.Deployment
 }
 
-func NewSnapshotterDeployment(namespace, serviceAccount, snapshotterImage, rootDir string, replicaCount int, tolerations []v1.Toleration,
-	tolerationsString, priorityClass, registrySecret string, imagePullPolicy v1.PullPolicy, nodeSelector map[string]string) *SnapshotterDeployment {
-	service := getCommonService(types.CSISnapshotterName, namespace)
+func NewSnapshotterDeployment(namespace, serviceAccount, snapshotterImage, rootDir string, replicaCount int, tolerations []corev1.Toleration,
+	tolerationsString, priorityClass, registrySecret string, imagePullPolicy corev1.PullPolicy, nodeSelector map[string]string) *SnapshotterDeployment {
 
 	deployment := getCommonDeployment(
 		types.CSISnapshotterName,
@@ -285,37 +222,20 @@ func NewSnapshotterDeployment(namespace, serviceAccount, snapshotterImage, rootD
 	)
 
 	return &SnapshotterDeployment{
-		service:    service,
 		deployment: deployment,
 	}
 }
 
 func (p *SnapshotterDeployment) Deploy(kubeClient *clientset.Clientset) error {
-	if err := deploy(kubeClient, p.service, "service",
-		serviceCreateFunc, serviceDeleteFunc, serviceGetFunc); err != nil {
-		return err
-	}
-
 	return deploy(kubeClient, p.deployment, "deployment",
 		deploymentCreateFunc, deploymentDeleteFunc, deploymentGetFunc)
 }
 
 func (p *SnapshotterDeployment) Cleanup(kubeClient *clientset.Clientset) {
-	var wg sync.WaitGroup
-	defer wg.Wait()
-
-	util.RunAsync(&wg, func() {
-		if err := cleanup(kubeClient, p.service, "service",
-			serviceDeleteFunc, serviceGetFunc); err != nil {
-			logrus.Warnf("Failed to cleanup service in snapshotter deployment: %v", err)
-		}
-	})
-	util.RunAsync(&wg, func() {
-		if err := cleanup(kubeClient, p.deployment, "deployment",
-			deploymentDeleteFunc, deploymentGetFunc); err != nil {
-			logrus.Warnf("Failed to cleanup deployment in snapshotter deployment: %v", err)
-		}
-	})
+	if err := cleanup(kubeClient, p.deployment, "deployment",
+		deploymentDeleteFunc, deploymentGetFunc); err != nil {
+		logrus.WithError(err).Warn("Failed to cleanup deployment in snapshotter deployment")
+	}
 }
 
 type PluginDeployment struct {
@@ -323,7 +243,7 @@ type PluginDeployment struct {
 }
 
 func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, livenessProbeImage, managerImage, managerURL, rootDir string,
-	tolerations []v1.Toleration, tolerationsString, priorityClass, registrySecret string, imagePullPolicy v1.PullPolicy, nodeSelector map[string]string) *PluginDeployment {
+	tolerations []corev1.Toleration, tolerationsString, priorityClass, registrySecret string, imagePullPolicy corev1.PullPolicy, nodeSelector map[string]string) *PluginDeployment {
 
 	daemonSet := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -339,25 +259,25 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 					"app": types.CSIPluginName,
 				},
 			},
-			Template: v1.PodTemplateSpec{
+			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
 						"app": types.CSIPluginName,
 					},
 				},
-				Spec: v1.PodSpec{
+				Spec: corev1.PodSpec{
 					ServiceAccountName: serviceAccount,
 					Tolerations:        tolerations,
 					NodeSelector:       nodeSelector,
 					PriorityClassName:  priorityClass,
 					HostPID:            true,
-					Containers: []v1.Container{
+					Containers: []corev1.Container{
 						{
 							Name:  "node-driver-registrar",
 							Image: nodeDriverRegistrarImage,
-							Lifecycle: &v1.Lifecycle{
-								PreStop: &v1.LifecycleHandler{
-									Exec: &v1.ExecAction{
+							Lifecycle: &corev1.Lifecycle{
+								PreStop: &corev1.LifecycleHandler{
+									Exec: &corev1.ExecAction{
 										Command: []string{
 											"/bin/sh", "-c",
 											fmt.Sprintf("rm -rf %s/%s %s/%s-reg.sock %s/*", GetInContainerCSIRegistrationDir(), types.LonghornDriverName, GetInContainerCSIRegistrationDir(), types.LonghornDriverName, GetInContainerCSISocketDir()),
@@ -365,7 +285,7 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 									},
 								},
 							},
-							SecurityContext: &v1.SecurityContext{
+							SecurityContext: &corev1.SecurityContext{
 								Privileged: pointer.BoolPtr(true),
 							},
 							Args: []string{
@@ -373,14 +293,14 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 								"--csi-address=$(ADDRESS)",
 								"--kubelet-registration-path=" + GetCSISocketFilePath(rootDir),
 							},
-							Env: []v1.EnvVar{
+							Env: []corev1.EnvVar{
 								{
 									Name:  "ADDRESS",
 									Value: GetInContainerCSISocketFilePath(),
 								},
 							},
 							ImagePullPolicy: imagePullPolicy,
-							VolumeMounts: []v1.VolumeMount{
+							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "socket-dir",
 									MountPath: GetInContainerCSISocketDir(),
@@ -399,7 +319,7 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 								"--v=4",
 								fmt.Sprintf("--csi-address=%s", GetInContainerCSISocketFilePath()),
 							},
-							VolumeMounts: []v1.VolumeMount{
+							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "socket-dir",
 									MountPath: GetInContainerCSISocketDir(),
@@ -408,10 +328,10 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 						},
 						{
 							Name: types.CSIPluginName,
-							SecurityContext: &v1.SecurityContext{
+							SecurityContext: &corev1.SecurityContext{
 								Privileged: pointer.BoolPtr(true),
-								Capabilities: &v1.Capabilities{
-									Add: []v1.Capability{
+								Capabilities: &corev1.Capabilities{
+									Add: []corev1.Capability{
 										"SYS_ADMIN",
 									},
 								},
@@ -419,15 +339,15 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 							},
 							Image:           managerImage,
 							ImagePullPolicy: imagePullPolicy,
-							Ports: []v1.ContainerPort{
+							Ports: []corev1.ContainerPort{
 								{
 									ContainerPort: DefaultCSILivenessProbePort,
-									Protocol:      v1.ProtocolTCP,
+									Protocol:      corev1.ProtocolTCP,
 								},
 							},
-							LivenessProbe: &v1.Probe{
-								ProbeHandler: v1.ProbeHandler{
-									HTTPGet: &v1.HTTPGetAction{
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
 										Path: "/healthz",
 										Port: intstr.FromInt(DefaultCSILivenessProbePort),
 									},
@@ -437,9 +357,9 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 								PeriodSeconds:       datastore.PodProbePeriodSeconds,
 								FailureThreshold:    datastore.PodLivenessProbeFailureThreshold,
 							},
-							Lifecycle: &v1.Lifecycle{
-								PreStop: &v1.LifecycleHandler{
-									Exec: &v1.ExecAction{
+							Lifecycle: &corev1.Lifecycle{
+								PreStop: &corev1.LifecycleHandler{
+									Exec: &corev1.ExecAction{
 										Command: []string{
 											"/bin/sh", "-c",
 											fmt.Sprintf("rm -f %s/*", GetInContainerCSISocketDir()),
@@ -456,11 +376,11 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 								fmt.Sprintf("--drivername=%s", types.LonghornDriverName),
 								"--manager-url=" + managerURL,
 							},
-							Env: []v1.EnvVar{
+							Env: []corev1.EnvVar{
 								{
 									Name: "NODE_ID",
-									ValueFrom: &v1.EnvVarSource{
-										FieldRef: &v1.ObjectFieldSelector{
+									ValueFrom: &corev1.EnvVarSource{
+										FieldRef: &corev1.ObjectFieldSelector{
 											FieldPath: "spec.nodeName",
 										},
 									},
@@ -470,7 +390,7 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 									Value: GetCSIEndpoint(),
 								},
 							},
-							VolumeMounts: []v1.VolumeMount{
+							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "socket-dir",
 									MountPath: GetInContainerCSISocketDir(),
@@ -506,11 +426,11 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 							},
 						},
 					},
-					Volumes: []v1.Volume{
+					Volumes: []corev1.Volume{
 						{
 							Name: "kubernetes-csi-dir",
-							VolumeSource: v1.VolumeSource{
-								HostPath: &v1.HostPathVolumeSource{
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
 									Path: GetCSIKubernetesDir(rootDir),
 									Type: &HostPathDirectoryOrCreate,
 								},
@@ -518,8 +438,8 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 						},
 						{
 							Name: "registration-dir",
-							VolumeSource: v1.VolumeSource{
-								HostPath: &v1.HostPathVolumeSource{
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
 									Path: GetCSIRegistrationDir(rootDir),
 									Type: &HostPathDirectoryOrCreate,
 								},
@@ -527,8 +447,8 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 						},
 						{
 							Name: "socket-dir",
-							VolumeSource: v1.VolumeSource{
-								HostPath: &v1.HostPathVolumeSource{
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
 									Path: GetCSISocketDir(rootDir),
 									Type: &HostPathDirectoryOrCreate,
 								},
@@ -536,8 +456,8 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 						},
 						{
 							Name: "pods-mount-dir",
-							VolumeSource: v1.VolumeSource{
-								HostPath: &v1.HostPathVolumeSource{
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
 									Path: GetCSIPodsDir(rootDir),
 									Type: &HostPathDirectoryOrCreate,
 								},
@@ -545,32 +465,32 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 						},
 						{
 							Name: "host-dev",
-							VolumeSource: v1.VolumeSource{
-								HostPath: &v1.HostPathVolumeSource{
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
 									Path: "/dev",
 								},
 							},
 						},
 						{
 							Name: "host-sys",
-							VolumeSource: v1.VolumeSource{
-								HostPath: &v1.HostPathVolumeSource{
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
 									Path: "/sys",
 								},
 							},
 						},
 						{
 							Name: "host",
-							VolumeSource: v1.VolumeSource{
-								HostPath: &v1.HostPathVolumeSource{
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
 									Path: "/",
 								},
 							},
 						},
 						{
 							Name: "lib-modules",
-							VolumeSource: v1.VolumeSource{
-								HostPath: &v1.HostPathVolumeSource{
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
 									Path: "/lib/modules",
 								},
 							},
@@ -582,12 +502,13 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 	}
 
 	if registrySecret != "" {
-		daemonSet.Spec.Template.Spec.ImagePullSecrets = []v1.LocalObjectReference{
+		daemonSet.Spec.Template.Spec.ImagePullSecrets = []corev1.LocalObjectReference{
 			{
 				Name: registrySecret,
 			},
 		}
 	}
+	types.AddGoCoverDirToDaemonSet(daemonSet)
 
 	return &PluginDeployment{
 		daemonSet: daemonSet,
@@ -602,7 +523,7 @@ func (p *PluginDeployment) Deploy(kubeClient *clientset.Clientset) error {
 func (p *PluginDeployment) Cleanup(kubeClient *clientset.Clientset) {
 	if err := cleanup(kubeClient, p.daemonSet, "daemon set",
 		daemonSetDeleteFunc, daemonSetGetFunc); err != nil {
-		logrus.Warnf("Failed to cleanup DaemonSet in plugin deployment: %v", err)
+		logrus.WithError(err).Warn("Failed to cleanup DaemonSet in plugin deployment")
 	}
 }
 
@@ -633,6 +554,6 @@ func (d *DriverObjectDeployment) Deploy(kubeClient *clientset.Clientset) error {
 func (d *DriverObjectDeployment) Cleanup(kubeClient *clientset.Clientset) {
 	if err := cleanup(kubeClient, d.obj, "CSI Driver",
 		csiDriverObjectDeleteFunc, csiDriverObjectGetFunc); err != nil {
-		logrus.Warnf("Failed to cleanup CSI Driver object in CSI Driver object deployment: %v", err)
+		logrus.WithError(err).Warn("Failed to cleanup CSI Driver object in CSI Driver object deployment")
 	}
 }

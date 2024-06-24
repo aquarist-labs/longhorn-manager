@@ -14,8 +14,9 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	"github.com/longhorn/longhorn-manager/util"
+
+	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 )
 
 const (
@@ -36,6 +37,7 @@ const (
 	LonghornKindSupportBundle       = "SupportBundle"
 	LonghornKindSystemRestore       = "SystemRestore"
 	LonghornKindOrphan              = "Orphan"
+	LonghornKindObjectStore         = "ObjectStore"
 
 	LonghornKindBackingImageDataSource = "BackingImageDataSource"
 
@@ -43,6 +45,7 @@ const (
 	LonghornKindRecurringJobList = "RecurringJobList"
 	LonghornKindSettingList      = "SettingList"
 	LonghornKindVolumeList       = "VolumeList"
+	LonghornKindObjectStoreList  = "ObjectStoreList"
 
 	KubernetesKindClusterRole           = "ClusterRole"
 	KubernetesKindClusterRoleBinding    = "ClusterRoleBinding"
@@ -126,6 +129,7 @@ const (
 	LastAppliedTolerationAnnotationKeySuffix = "last-applied-tolerations"
 
 	ConfigMapResourceVersionKey = "configmap-resource-version"
+	UpdateSettingFromLonghorn   = "update-setting-from-longhorn"
 
 	KubernetesStatusLabel = "KubernetesStatus"
 	KubernetesReplicaSet  = "ReplicaSet"
@@ -159,6 +163,8 @@ const (
 	LonghornLabelRecurringJob               = "job"
 	LonghornLabelRecurringJobGroup          = "job-group"
 	LonghornLabelRecurringJobSource         = "source"
+	LonghornLabelObjectStore                = "object-store"
+	LonghornLabelObjectStoreImage           = "object-store-image"
 	LonghornLabelOrphan                     = "orphan"
 	LonghornLabelOrphanType                 = "orphan-type"
 	LonghornLabelRecoveryBackend            = "recovery-backend"
@@ -179,6 +185,8 @@ const (
 	LonghornLabelExportFromVolume                 = "export-from-volume"
 	LonghornLabelSnapshotForExportingBackingImage = "for-exporting-backing-image"
 
+	LonghornAnnotationObjectStoreName = "objectstore.longhorn.io/name"
+
 	KubernetesFailureDomainRegionLabelKey = "failure-domain.beta.kubernetes.io/region"
 	KubernetesFailureDomainZoneLabelKey   = "failure-domain.beta.kubernetes.io/zone"
 	KubernetesTopologyRegionLabelKey      = "topology.kubernetes.io/region"
@@ -190,12 +198,15 @@ const (
 
 	DefaultDiskPrefix = "default-disk-"
 
-	DeprecatedProvisionerName          = "rancher.io/longhorn"
-	DepracatedDriverName               = "io.rancher.longhorn"
-	DefaultStorageClassConfigMapName   = "longhorn-storageclass"
-	DefaultDefaultSettingConfigMapName = "longhorn-default-setting"
-	DefaultStorageClassName            = "longhorn"
-	ControlPlaneName                   = "longhorn-manager"
+	DeprecatedProvisionerName                   = "rancher.io/longhorn"
+	DepracatedDriverName                        = "io.rancher.longhorn"
+	DefaultStorageClassConfigMapName            = "longhorn-storageclass"
+	DefaultObjectStoreStorageClassConfigMapName = "longhorn-objectstorage-static-storageclass"
+	DefaultDefaultSettingConfigMapName          = "longhorn-default-setting"
+	DefaultStorageClassName                     = "longhorn"
+	ControlPlaneName                            = "longhorn-manager"
+
+	StorageClassConfigMapKey = "storageclass.yaml"
 
 	DefaultRecurringJobConcurrency = 10
 
@@ -272,6 +283,14 @@ func (e *NotFoundError) Error() string {
 	return fmt.Sprintf("cannot find %v", e.Name)
 }
 
+type ErrorInvalidState struct {
+	Reason string
+}
+
+func (e *ErrorInvalidState) Error() string {
+	return fmt.Sprintf("current state prevents this: %v", e.Reason)
+}
+
 const (
 	engineSuffix    = "-e"
 	replicaSuffix   = "-r"
@@ -291,8 +310,16 @@ const (
 	replicaManagerPrefix  = instanceManagerPrefix + "r-"
 )
 
-func GenerateEngineNameForVolume(vName string) string {
-	return vName + engineSuffix + "-" + util.RandomID()
+func GenerateEngineNameForVolume(vName, currentEngineName string) string {
+	if currentEngineName == "" {
+		return vName + engineSuffix + "-" + "0"
+	}
+	parts := strings.Split(currentEngineName, "-")
+	suffix, err := strconv.Atoi(parts[len(parts)-1])
+	if err != nil {
+		return vName + engineSuffix + "-" + "1"
+	}
+	return vName + engineSuffix + "-" + strconv.Itoa(suffix+1)
 }
 
 func GenerateReplicaNameForVolume(vName string) string {
@@ -379,6 +406,11 @@ func GetLonghornLabelCRDAPIVersionKey() string {
 	return GetLonghornLabelKey(LonghornLabelCRDAPIVersion)
 }
 
+func GetManagerLabels() map[string]string {
+	return map[string]string{
+		"app": LonghornManagerDaemonSetName,
+	}
+}
 func GetEngineImageLabels(engineImageName string) map[string]string {
 	labels := GetBaseLabelsForSystemManagedComponent()
 	labels[GetLonghornLabelComponentKey()] = LonghornLabelEngineImage
@@ -497,6 +529,13 @@ func GetVolumeLabels(volumeName string) map[string]string {
 	return map[string]string{
 		LonghornLabelVolume: volumeName,
 	}
+}
+
+func GetObjectStoreLabels(store *longhorn.ObjectStore) map[string]string {
+	labels := GetBaseLabelsForSystemManagedComponent()
+	labels[GetLonghornLabelComponentKey()] = LonghornLabelObjectStore
+	labels[GetLonghornLabelKey(LonghornLabelObjectStore)] = store.Name
+	return labels
 }
 
 func GetRecurringJobLabelKeyByType(name string, isGroup bool) string {
@@ -692,6 +731,11 @@ func ErrorAlreadyExists(err error) bool {
 	return strings.Contains(err.Error(), "already exists")
 }
 
+func ErrorIsInvalidState(err error) bool {
+	var dummy *ErrorInvalidState
+	return errors.As(err, &dummy)
+}
+
 func ValidateReplicaCount(count int) error {
 	if count < 1 || count > 20 {
 		return fmt.Errorf("replica count value must between 1 to 20")
@@ -799,6 +843,15 @@ func ValidateReplicaZoneSoftAntiAffinity(value longhorn.ReplicaZoneSoftAntiAffin
 		value != longhorn.ReplicaZoneSoftAntiAffinityEnabled &&
 		value != longhorn.ReplicaZoneSoftAntiAffinityDisabled {
 		return fmt.Errorf("invalid ReplicaZoneSoftAntiAffinity setting: %v", value)
+	}
+	return nil
+}
+
+func ValidateReplicaDiskSoftAntiAffinity(value longhorn.ReplicaDiskSoftAntiAffinity) error {
+	if value != longhorn.ReplicaDiskSoftAntiAffinityDefault &&
+		value != longhorn.ReplicaDiskSoftAntiAffinityEnabled &&
+		value != longhorn.ReplicaDiskSoftAntiAffinityDisabled {
+		return fmt.Errorf("invalid ReplicaDiskSoftAntiAffinity setting: %v", value)
 	}
 	return nil
 }
@@ -995,10 +1048,16 @@ func GetLHVolumeAttachmentNameFromVolumeName(volName string) string {
 
 // IsSelectorsInTags checks if all the selectors are present in the tags slice.
 // It returns true if all selectors are found, false otherwise.
-func IsSelectorsInTags(tags, selectors []string) bool {
+func IsSelectorsInTags(tags, selectors []string, allowEmptySelector bool) bool {
 	if !sort.StringsAreSorted(tags) {
 		logrus.Debug("BUG: Tags are not sorted, sorting now")
 		sort.Strings(tags)
+	}
+
+	if len(selectors) == 0 {
+		if !allowEmptySelector && len(tags) != 0 {
+			return false
+		}
 	}
 
 	for _, selector := range selectors {
@@ -1036,4 +1095,16 @@ func GetBackupTargetSchemeFromURL(backupTargetURL string) string {
 	default:
 		return ValueUnknown
 	}
+}
+
+func GetPDBName(im *longhorn.InstanceManager) string {
+	return GetPDBNameFromIMName(im.Name)
+}
+
+func GetPDBNameFromIMName(imName string) string {
+	return imName
+}
+
+func GetIMNameFromPDBName(pdbName string) string {
+	return pdbName
 }

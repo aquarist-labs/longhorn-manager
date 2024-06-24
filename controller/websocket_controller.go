@@ -69,10 +69,16 @@ func NewWebsocketController(
 	wc.cacheSyncs = append(wc.cacheSyncs, ds.BackupInformer.HasSynced)
 	ds.RecurringJobInformer.AddEventHandler(wc.notifyWatchersHandler("recurringJob"))
 	wc.cacheSyncs = append(wc.cacheSyncs, ds.RecurringJobInformer.HasSynced)
+	ds.ObjectStoreInformer.AddEventHandler(wc.notifyWatchersHandler("objectStore"))
+	wc.cacheSyncs = append(wc.cacheSyncs, ds.ObjectStoreInformer.HasSynced)
 	ds.SystemBackupInformer.AddEventHandler(wc.notifyWatchersHandler("systemBackup"))
 	wc.cacheSyncs = append(wc.cacheSyncs, ds.SystemBackupInformer.HasSynced)
 	ds.SystemRestoreInformer.AddEventHandler(wc.notifyWatchersHandler("systemRestore"))
 	wc.cacheSyncs = append(wc.cacheSyncs, ds.SystemRestoreInformer.HasSynced)
+	ds.StorageClassInformer.AddEventHandler(wc.notifyWatchersHandler("storageClass"))
+	wc.cacheSyncs = append(wc.cacheSyncs, ds.StorageClassInformer.HasSynced)
+	ds.SecretInformer.AddEventHandler(wc.notifyWatchersHandler("secret"))
+	wc.cacheSyncs = append(wc.cacheSyncs, ds.SecretInformer.HasSynced)
 
 	return wc
 }

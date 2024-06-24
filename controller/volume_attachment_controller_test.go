@@ -5,20 +5,22 @@ import (
 	"fmt"
 
 	"github.com/sirupsen/logrus"
-	. "gopkg.in/check.v1"
 
-	apiextensionsfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 
+	apiextensionsfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/longhorn/longhorn-manager/datastore"
+	"github.com/longhorn/longhorn-manager/types"
+	"github.com/longhorn/longhorn-manager/util"
+
 	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	lhfake "github.com/longhorn/longhorn-manager/k8s/pkg/client/clientset/versioned/fake"
-	lhinformerfactory "github.com/longhorn/longhorn-manager/k8s/pkg/client/informers/externalversions"
-	"github.com/longhorn/longhorn-manager/types"
+
+	. "gopkg.in/check.v1"
 )
 
 type volumeAttachmentTestCase struct {
@@ -422,13 +424,14 @@ func (s *TestSuite) runVolumeAttachmentTestCase(c *C, tc *volumeAttachmentTestCa
 	kubeClient := fake.NewSimpleClientset()
 	lhClient := lhfake.NewSimpleClientset()
 	extensionsClient := apiextensionsfake.NewSimpleClientset()
-	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
-	lhInformerFactory := lhinformerfactory.NewSharedInformerFactory(lhClient, 0)
-	ds := datastore.NewDataStore(lhInformerFactory, lhClient, kubeInformerFactory, kubeClient, extensionsClient, TestNamespace)
+
+	informerFactories := util.NewInformerFactories(TestNamespace, kubeClient, lhClient, 0)
+
+	ds := datastore.NewDataStore(TestNamespace, lhClient, kubeClient, extensionsClient, informerFactories)
 	logger := logrus.StandardLogger()
 
-	volumeIndexer := lhInformerFactory.Longhorn().V1beta2().Volumes().Informer().GetIndexer()
-	volumeAttachmentIndexer := lhInformerFactory.Longhorn().V1beta2().VolumeAttachments().Informer().GetIndexer()
+	volumeIndexer := informerFactories.LhInformerFactory.Longhorn().V1beta2().Volumes().Informer().GetIndexer()
+	volumeAttachmentIndexer := informerFactories.LhInformerFactory.Longhorn().V1beta2().VolumeAttachments().Informer().GetIndexer()
 
 	vac := NewLonghornVolumeAttachmentController(logger, ds, scheme.Scheme, kubeClient, TestOwnerID1, TestNamespace)
 	fakeRecorder := record.NewFakeRecorder(100)

@@ -14,6 +14,7 @@ import (
 	"github.com/urfave/cli"
 
 	"github.com/longhorn/go-iscsi-helper/iscsi"
+
 	iscsiutil "github.com/longhorn/go-iscsi-helper/util"
 
 	"github.com/longhorn/longhorn-manager/api"
@@ -21,10 +22,12 @@ import (
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/manager"
 	"github.com/longhorn/longhorn-manager/meta"
-	metricsCollector "github.com/longhorn/longhorn-manager/metrics_collector"
 	"github.com/longhorn/longhorn-manager/types"
 	"github.com/longhorn/longhorn-manager/upgrade"
 	"github.com/longhorn/longhorn-manager/util"
+	"github.com/longhorn/longhorn-manager/util/client"
+
+	metricscollector "github.com/longhorn/longhorn-manager/metrics_collector"
 )
 
 const (
@@ -34,6 +37,8 @@ const (
 	FlagBackingImageManagerImage  = "backing-image-manager-image"
 	FlagManagerImage              = "manager-image"
 	FlagSupportBundleManagerImage = "support-bundle-manager-image"
+	FlagObjectStoreImage          = "object-store-image"
+	FlagObjectStoreUIImage        = "object-store-ui-image"
 	FlagServiceAccount            = "service-account"
 	FlagKubeConfig                = "kube-config"
 )
@@ -61,6 +66,14 @@ func DaemonCmd() cli.Command {
 			cli.StringFlag{
 				Name:  FlagSupportBundleManagerImage,
 				Usage: "Specify Longhorn support bundle manager image",
+			},
+			cli.StringFlag{
+				Name:  FlagObjectStoreImage,
+				Usage: "Specify Longhorn object storage gateway image",
+			},
+			cli.StringFlag{
+				Name:  FlagObjectStoreUIImage,
+				Usage: "Specify Longhorn object storage ui image",
 			},
 			cli.StringFlag{
 				Name:  FlagManagerImage,
@@ -108,6 +121,14 @@ func startManager(c *cli.Context) error {
 	if supportBundleManagerImage == "" {
 		return fmt.Errorf("require %v", FlagSupportBundleManagerImage)
 	}
+	objectStoreImage := c.String(FlagObjectStoreImage)
+	if objectStoreImage == "" {
+		return fmt.Errorf("require %v", FlagObjectStoreImage)
+	}
+	objectStoreUIImage := c.String(FlagObjectStoreUIImage)
+	if objectStoreUIImage == "" {
+		return fmt.Errorf("require %v", FlagObjectStoreUIImage)
+	}
 	managerImage := c.String(FlagManagerImage)
 	if managerImage == "" {
 		return fmt.Errorf("require %v", FlagManagerImage)
@@ -136,41 +157,56 @@ func startManager(c *cli.Context) error {
 
 	logger := logrus.StandardLogger().WithField("node", currentNodeID)
 
+	clients, err := client.NewClients(kubeconfigPath, ctx.Done())
+	if err != nil {
+		return err
+	}
+
 	webhookTypes := []string{types.WebhookTypeConversion, types.WebhookTypeAdmission}
 	for _, webhookType := range webhookTypes {
-		if err := startWebhook(ctx, serviceAccount, kubeconfigPath, webhookType); err != nil {
+		if err := startWebhook(ctx, webhookType, clients); err != nil {
 			return err
 		}
 	}
 
-	if err := startRecoveryBackend(ctx, serviceAccount, kubeconfigPath); err != nil {
+	if err := startRecoveryBackend(clients); err != nil {
 		return err
 	}
 
-	if err := upgrade.Upgrade(kubeconfigPath, currentNodeID); err != nil {
+	if err := upgrade.Upgrade(kubeconfigPath, currentNodeID, managerImage); err != nil {
 		return err
 	}
 
 	proxyConnCounter := util.NewAtomicCounter()
 
-	ds, wsc, err := controller.StartControllers(logger, ctx.Done(),
-		currentNodeID, serviceAccount, managerImage, backingImageManagerImage, shareManagerImage,
-		kubeconfigPath, meta.Version, proxyConnCounter)
+	wsc, err := controller.StartControllers(
+		logger,
+		clients,
+		currentNodeID,
+		serviceAccount,
+		managerImage,
+		backingImageManagerImage,
+		shareManagerImage,
+		kubeconfigPath,
+		meta.Version,
+		proxyConnCounter)
 	if err != nil {
 		return err
 	}
 
-	m := manager.NewVolumeManager(currentNodeID, ds, proxyConnCounter)
+	m := manager.NewVolumeManager(currentNodeID, clients.Datastore, proxyConnCounter)
 
-	metricsCollector.InitMetricsCollectorSystem(logger, currentNodeID, ds, kubeconfigPath, proxyConnCounter)
+	metricscollector.InitMetricsCollectorSystem(logger, currentNodeID, clients.Datastore, kubeconfigPath, proxyConnCounter)
 
 	defaultImageSettings := map[types.SettingName]string{
 		types.SettingNameDefaultEngineImage:              engineImage,
 		types.SettingNameDefaultInstanceManagerImage:     instanceManagerImage,
 		types.SettingNameDefaultBackingImageManagerImage: backingImageManagerImage,
 		types.SettingNameSupportBundleManagerImage:       supportBundleManagerImage,
+		types.SettingNameObjectStoreImage:                objectStoreImage,
+		types.SettingNameObjectStoreUIImage:              objectStoreUIImage,
 	}
-	if err := ds.UpdateCustomizedSettings(defaultImageSettings); err != nil {
+	if err := clients.Datastore.UpdateCustomizedSettings(defaultImageSettings); err != nil {
 		return err
 	}
 
@@ -178,7 +214,7 @@ func startManager(c *cli.Context) error {
 		return err
 	}
 
-	if err := initDaemonNode(ds); err != nil {
+	if err := initDaemonNode(clients.Datastore); err != nil {
 		return err
 	}
 
@@ -189,13 +225,15 @@ func startManager(c *cli.Context) error {
 	server := api.NewServer(m, wsc)
 	router := http.Handler(api.NewRouter(server))
 	router = util.FilteredLoggingHandler(map[string]struct{}{
-		"/v1/apiversions":  {},
-		"/v1/schemas":      {},
-		"/v1/settings":     {},
-		"/v1/volumes":      {},
-		"/v1/nodes":        {},
-		"/v1/engineimages": {},
-		"/v1/events":       {},
+		"/v1/apiversions":    {},
+		"/v1/schemas":        {},
+		"/v1/settings":       {},
+		"/v1/volumes":        {},
+		"/v1/nodes":          {},
+		"/v1/engineimages":   {},
+		"/v1/events":         {},
+		"/v1/objectstores":   {},
+		"/v1/storageclasses": {},
 	}, os.Stdout, router)
 	router = handlers.ProxyHeaders(router)
 

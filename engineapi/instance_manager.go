@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	CurrentInstanceManagerAPIVersion = 4
+	CurrentInstanceManagerAPIVersion = 5
 	MinInstanceManagerAPIVersion     = 1
 	UnknownInstanceManagerAPIVersion = 0
 
@@ -336,10 +336,14 @@ func getBinaryAndArgsForEngineProcessCreation(e *longhorn.Engine,
 		}
 	}
 
+	if engineCLIAPIVersion >= 9 {
+		args = append([]string{"--engine-instance-name", e.Name}, args...)
+	}
+
 	for _, addr := range e.Status.CurrentReplicaAddressMap {
 		args = append(args, "--replica", GetBackendReplicaURL(addr))
 	}
-	binary := filepath.Join(types.GetEngineBinaryDirectoryForEngineManagerContainer(e.Spec.EngineImage), types.EngineBinaryName)
+	binary := filepath.Join(types.GetEngineBinaryDirectoryForEngineManagerContainer(e.Spec.Image), types.EngineBinaryName)
 
 	return binary, args, nil
 }
@@ -358,7 +362,10 @@ func getBinaryAndArgsForReplicaProcessCreation(r *longhorn.Replica,
 		args = append(args, "--disableRevCounter")
 	}
 	if engineCLIAPIVersion >= 7 {
-		args = append(args, "--volume-name", r.Spec.VolumeName)
+		if engineCLIAPIVersion < 9 {
+			// Replaced by the global --volume-name flag when engineCLIAPIVersion == 9.
+			args = append(args, "--volume-name", r.Spec.VolumeName)
+		}
 
 		if dataLocality == longhorn.DataLocalityStrictLocal {
 			args = append(args, "--data-server-protocol", "unix")
@@ -369,11 +376,16 @@ func getBinaryAndArgsForReplicaProcessCreation(r *longhorn.Replica,
 		}
 	}
 
+	if engineCLIAPIVersion >= 9 {
+		args = append(args, "--replica-instance-name", r.Name)
+		args = append([]string{"--volume-name", r.Spec.VolumeName}, args...)
+	}
+
 	// 3 ports are already used by replica server, data server and syncagent server
 	syncAgentPortCount := portCount - 3
 	args = append(args, "--sync-agent-port-count", strconv.Itoa(syncAgentPortCount))
 
-	binary := filepath.Join(types.GetEngineBinaryDirectoryForReplicaManagerContainer(r.Spec.EngineImage), types.EngineBinaryName)
+	binary := filepath.Join(types.GetEngineBinaryDirectoryForReplicaManagerContainer(r.Spec.Image), types.EngineBinaryName)
 
 	return binary, args
 }
@@ -687,7 +699,11 @@ func (c *InstanceManagerClient) engineInstanceUpgrade(req *EngineInstanceUpgrade
 		}
 	}
 
-	binary := filepath.Join(types.GetEngineBinaryDirectoryForEngineManagerContainer(req.Engine.Spec.EngineImage), types.EngineBinaryName)
+	if req.EngineCLIAPIVersion >= 9 {
+		args = append([]string{"--engine-instance-name", req.Engine.Name}, args...)
+	}
+
+	binary := filepath.Join(types.GetEngineBinaryDirectoryForEngineManagerContainer(req.Engine.Spec.Image), types.EngineBinaryName)
 
 	if c.GetAPIVersion() < 4 {
 		process, err := c.processManagerGrpcClient.ProcessReplace(

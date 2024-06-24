@@ -15,17 +15,18 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
+
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	clientset "k8s.io/client-go/kubernetes"
 
-	"github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
-	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
-	lhclientset "github.com/longhorn/longhorn-manager/k8s/pkg/client/clientset/versioned"
 	"github.com/longhorn/longhorn-manager/meta"
 	"github.com/longhorn/longhorn-manager/types"
+
+	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
+	lhclientset "github.com/longhorn/longhorn-manager/k8s/pkg/client/clientset/versioned"
 )
 
 const (
@@ -91,7 +92,7 @@ func (pm *ProgressMonitor) GetCurrentProgress() (int, int, float64) {
 	return pm.currentValue, pm.targetValue, pm.currentProgressInPercentage
 }
 
-func ListShareManagerPods(namespace string, kubeClient *clientset.Clientset) ([]v1.Pod, error) {
+func ListShareManagerPods(namespace string, kubeClient *clientset.Clientset) ([]corev1.Pod, error) {
 	smPodsList, err := kubeClient.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
 		LabelSelector: labels.Set(types.GetShareManagerComponentLabel()).String(),
 	})
@@ -101,7 +102,7 @@ func ListShareManagerPods(namespace string, kubeClient *clientset.Clientset) ([]
 	return smPodsList.Items, nil
 }
 
-func ListIMPods(namespace string, kubeClient *clientset.Clientset) ([]v1.Pod, error) {
+func ListIMPods(namespace string, kubeClient *clientset.Clientset) ([]corev1.Pod, error) {
 	imPodsList, err := kubeClient.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("%s=%s", types.GetLonghornLabelComponentKey(), types.LonghornLabelInstanceManager),
 	})
@@ -109,6 +110,16 @@ func ListIMPods(namespace string, kubeClient *clientset.Clientset) ([]v1.Pod, er
 		return nil, err
 	}
 	return imPodsList.Items, nil
+}
+
+func ListManagerPods(namespace string, kubeClient *clientset.Clientset) ([]corev1.Pod, error) {
+	managerPodsList, err := kubeClient.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{
+		LabelSelector: labels.Set(types.GetManagerLabels()).String(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return managerPodsList.Items, nil
 }
 
 func MergeStringMaps(baseMap, overwriteMap map[string]string) map[string]string {
@@ -153,6 +164,15 @@ func CreateOrUpdateLonghornVersionSetting(namespace string, lhClient *lhclientse
 
 	if s.Value != meta.Version {
 		s.Value = meta.Version
+		if s.Annotations == nil {
+			s.Annotations = make(map[string]string)
+		}
+		s.Annotations[types.GetLonghornLabelKey(types.UpdateSettingFromLonghorn)] = ""
+		s, err = lhClient.LonghornV1beta2().Settings(namespace).Update(context.TODO(), s, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+		delete(s.Annotations, types.GetLonghornLabelKey(types.UpdateSettingFromLonghorn))
 		_, err = lhClient.LonghornV1beta2().Settings(namespace).Update(context.TODO(), s, metav1.UpdateOptions{})
 		return err
 	}
@@ -280,18 +300,18 @@ func removeFirstChar(v string) string {
 }
 
 // ListAndUpdateSettingsInProvidedCache list all settings and save them into the provided cached `resourceMap`. This method is not thread-safe.
-func ListAndUpdateSettingsInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*v1beta2.Setting, error) {
+func ListAndUpdateSettingsInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*longhorn.Setting, error) {
 	if v, ok := resourceMaps[types.LonghornKindSetting]; ok {
-		return v.(map[string]*v1beta2.Setting), nil
+		return v.(map[string]*longhorn.Setting), nil
 	}
 
-	settings := map[string]*v1beta2.Setting{}
+	settings := map[string]*longhorn.Setting{}
 	settingList, err := lhClient.LonghornV1beta2().Settings(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
 	for _, setting := range settingList.Items {
-		settingCopy := v1beta2.Setting{}
+		settingCopy := longhorn.Setting{}
 		if err := copier.Copy(&settingCopy, setting); err != nil {
 			return nil, err
 		}
@@ -304,12 +324,12 @@ func ListAndUpdateSettingsInProvidedCache(namespace string, lhClient *lhclientse
 }
 
 // ListAndUpdateNodesInProvidedCache list all nodes and save them into the provided cached `resourceMap`. This method is not thread-safe.
-func ListAndUpdateNodesInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*v1beta2.Node, error) {
+func ListAndUpdateNodesInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*longhorn.Node, error) {
 	if v, ok := resourceMaps[types.LonghornKindNode]; ok {
-		return v.(map[string]*v1beta2.Node), nil
+		return v.(map[string]*longhorn.Node), nil
 	}
 
-	nodes := map[string]*v1beta2.Node{}
+	nodes := map[string]*longhorn.Node{}
 	nodeList, err := lhClient.LonghornV1beta2().Nodes(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -324,12 +344,12 @@ func ListAndUpdateNodesInProvidedCache(namespace string, lhClient *lhclientset.C
 }
 
 // ListAndUpdateOrphansInProvidedCache list all orphans and save them into the provided cached `resourceMap`. This method is not thread-safe.
-func ListAndUpdateOrphansInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*v1beta2.Orphan, error) {
+func ListAndUpdateOrphansInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*longhorn.Orphan, error) {
 	if v, ok := resourceMaps[types.LonghornKindOrphan]; ok {
-		return v.(map[string]*v1beta2.Orphan), nil
+		return v.(map[string]*longhorn.Orphan), nil
 	}
 
-	orphans := map[string]*v1beta2.Orphan{}
+	orphans := map[string]*longhorn.Orphan{}
 	orphanList, err := lhClient.LonghornV1beta2().Orphans(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -344,12 +364,12 @@ func ListAndUpdateOrphansInProvidedCache(namespace string, lhClient *lhclientset
 }
 
 // ListAndUpdateInstanceManagersInProvidedCache list all instanceManagers and save them into the provided cached `resourceMap`. This method is not thread-safe.
-func ListAndUpdateInstanceManagersInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*v1beta2.InstanceManager, error) {
+func ListAndUpdateInstanceManagersInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*longhorn.InstanceManager, error) {
 	if v, ok := resourceMaps[types.LonghornKindInstanceManager]; ok {
-		return v.(map[string]*v1beta2.InstanceManager), nil
+		return v.(map[string]*longhorn.InstanceManager), nil
 	}
 
-	ims := map[string]*v1beta2.InstanceManager{}
+	ims := map[string]*longhorn.InstanceManager{}
 	imList, err := lhClient.LonghornV1beta2().InstanceManagers(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -364,12 +384,12 @@ func ListAndUpdateInstanceManagersInProvidedCache(namespace string, lhClient *lh
 }
 
 // ListAndUpdateVolumesInProvidedCache list all volumes and save them into the provided cached `resourceMap`. This method is not thread-safe.
-func ListAndUpdateVolumesInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*v1beta2.Volume, error) {
+func ListAndUpdateVolumesInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*longhorn.Volume, error) {
 	if v, ok := resourceMaps[types.LonghornKindVolume]; ok {
-		return v.(map[string]*v1beta2.Volume), nil
+		return v.(map[string]*longhorn.Volume), nil
 	}
 
-	volumes := map[string]*v1beta2.Volume{}
+	volumes := map[string]*longhorn.Volume{}
 	volumeList, err := lhClient.LonghornV1beta2().Volumes(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -384,12 +404,12 @@ func ListAndUpdateVolumesInProvidedCache(namespace string, lhClient *lhclientset
 }
 
 // ListAndUpdateReplicasInProvidedCache list all replicas and save them into the provided cached `resourceMap`. This method is not thread-safe.
-func ListAndUpdateReplicasInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*v1beta2.Replica, error) {
+func ListAndUpdateReplicasInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*longhorn.Replica, error) {
 	if v, ok := resourceMaps[types.LonghornKindReplica]; ok {
-		return v.(map[string]*v1beta2.Replica), nil
+		return v.(map[string]*longhorn.Replica), nil
 	}
 
-	replicas := map[string]*v1beta2.Replica{}
+	replicas := map[string]*longhorn.Replica{}
 	replicaList, err := lhClient.LonghornV1beta2().Replicas(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -404,12 +424,12 @@ func ListAndUpdateReplicasInProvidedCache(namespace string, lhClient *lhclientse
 }
 
 // ListAndUpdateEnginesInProvidedCache list all engines and save them into the provided cached `resourceMap`. This method is not thread-safe.
-func ListAndUpdateEnginesInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*v1beta2.Engine, error) {
+func ListAndUpdateEnginesInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*longhorn.Engine, error) {
 	if v, ok := resourceMaps[types.LonghornKindEngine]; ok {
-		return v.(map[string]*v1beta2.Engine), nil
+		return v.(map[string]*longhorn.Engine), nil
 	}
 
-	engines := map[string]*v1beta2.Engine{}
+	engines := map[string]*longhorn.Engine{}
 	engineList, err := lhClient.LonghornV1beta2().Engines(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -424,12 +444,12 @@ func ListAndUpdateEnginesInProvidedCache(namespace string, lhClient *lhclientset
 }
 
 // ListAndUpdateBackupsInProvidedCache list all backups and save them into the provided cached `resourceMap`. This method is not thread-safe.
-func ListAndUpdateBackupsInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*v1beta2.Backup, error) {
+func ListAndUpdateBackupsInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*longhorn.Backup, error) {
 	if v, ok := resourceMaps[types.LonghornKindBackup]; ok {
-		return v.(map[string]*v1beta2.Backup), nil
+		return v.(map[string]*longhorn.Backup), nil
 	}
 
-	backups := map[string]*v1beta2.Backup{}
+	backups := map[string]*longhorn.Backup{}
 	backupList, err := lhClient.LonghornV1beta2().Backups(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -444,12 +464,12 @@ func ListAndUpdateBackupsInProvidedCache(namespace string, lhClient *lhclientset
 }
 
 // ListAndUpdateSnapshotsInProvidedCache list all snapshots and save them into the provided cached `resourceMap`. This method is not thread-safe.
-func ListAndUpdateSnapshotsInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*v1beta2.Snapshot, error) {
+func ListAndUpdateSnapshotsInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*longhorn.Snapshot, error) {
 	if v, ok := resourceMaps[types.LonghornKindSnapshot]; ok {
-		return v.(map[string]*v1beta2.Snapshot), nil
+		return v.(map[string]*longhorn.Snapshot), nil
 	}
 
-	snapshots := map[string]*v1beta2.Snapshot{}
+	snapshots := map[string]*longhorn.Snapshot{}
 	snapshotList, err := lhClient.LonghornV1beta2().Snapshots(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -464,12 +484,12 @@ func ListAndUpdateSnapshotsInProvidedCache(namespace string, lhClient *lhclients
 }
 
 // ListAndUpdateEngineImagesInProvidedCache list all engineImages and save them into the provided cached `resourceMap`. This method is not thread-safe.
-func ListAndUpdateEngineImagesInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*v1beta2.EngineImage, error) {
+func ListAndUpdateEngineImagesInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*longhorn.EngineImage, error) {
 	if v, ok := resourceMaps[types.LonghornKindEngineImage]; ok {
-		return v.(map[string]*v1beta2.EngineImage), nil
+		return v.(map[string]*longhorn.EngineImage), nil
 	}
 
-	eis := map[string]*v1beta2.EngineImage{}
+	eis := map[string]*longhorn.EngineImage{}
 	eiList, err := lhClient.LonghornV1beta2().EngineImages(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -484,12 +504,12 @@ func ListAndUpdateEngineImagesInProvidedCache(namespace string, lhClient *lhclie
 }
 
 // ListAndUpdateShareManagersInProvidedCache list all shareManagers and save them into the provided cached `resourceMap`. This method is not thread-safe.
-func ListAndUpdateShareManagersInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*v1beta2.ShareManager, error) {
+func ListAndUpdateShareManagersInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*longhorn.ShareManager, error) {
 	if v, ok := resourceMaps[types.LonghornKindShareManager]; ok {
-		return v.(map[string]*v1beta2.ShareManager), nil
+		return v.(map[string]*longhorn.ShareManager), nil
 	}
 
-	sms := map[string]*v1beta2.ShareManager{}
+	sms := map[string]*longhorn.ShareManager{}
 	smList, err := lhClient.LonghornV1beta2().ShareManagers(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -504,12 +524,12 @@ func ListAndUpdateShareManagersInProvidedCache(namespace string, lhClient *lhcli
 }
 
 // ListAndUpdateBackingImagesInProvidedCache list all backingImages and save them into the provided cached `resourceMap`. This method is not thread-safe.
-func ListAndUpdateBackingImagesInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*v1beta2.BackingImage, error) {
+func ListAndUpdateBackingImagesInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*longhorn.BackingImage, error) {
 	if v, ok := resourceMaps[types.LonghornKindBackingImage]; ok {
-		return v.(map[string]*v1beta2.BackingImage), nil
+		return v.(map[string]*longhorn.BackingImage), nil
 	}
 
-	bis := map[string]*v1beta2.BackingImage{}
+	bis := map[string]*longhorn.BackingImage{}
 	biList, err := lhClient.LonghornV1beta2().BackingImages(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -524,12 +544,12 @@ func ListAndUpdateBackingImagesInProvidedCache(namespace string, lhClient *lhcli
 }
 
 // ListAndUpdateBackingImageDataSourcesInProvidedCache list all backingImageDataSources and save them into the provided cached `resourceMap`. This method is not thread-safe.
-func ListAndUpdateBackingImageDataSourcesInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*v1beta2.BackingImageDataSource, error) {
+func ListAndUpdateBackingImageDataSourcesInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*longhorn.BackingImageDataSource, error) {
 	if v, ok := resourceMaps[types.LonghornKindBackingImageDataSource]; ok {
-		return v.(map[string]*v1beta2.BackingImageDataSource), nil
+		return v.(map[string]*longhorn.BackingImageDataSource), nil
 	}
 
-	bidss := map[string]*v1beta2.BackingImageDataSource{}
+	bidss := map[string]*longhorn.BackingImageDataSource{}
 	bidsList, err := lhClient.LonghornV1beta2().BackingImageDataSources(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -544,12 +564,12 @@ func ListAndUpdateBackingImageDataSourcesInProvidedCache(namespace string, lhCli
 }
 
 // ListAndUpdateRecurringJobsInProvidedCache list all recurringJobs and save them into the provided cached `resourceMap`. This method is not thread-safe.
-func ListAndUpdateRecurringJobsInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*v1beta2.RecurringJob, error) {
+func ListAndUpdateRecurringJobsInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*longhorn.RecurringJob, error) {
 	if v, ok := resourceMaps[types.LonghornKindRecurringJob]; ok {
-		return v.(map[string]*v1beta2.RecurringJob), nil
+		return v.(map[string]*longhorn.RecurringJob), nil
 	}
 
-	recurringJobs := map[string]*v1beta2.RecurringJob{}
+	recurringJobs := map[string]*longhorn.RecurringJob{}
 	recurringJobList, err := lhClient.LonghornV1beta2().RecurringJobs(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -563,18 +583,38 @@ func ListAndUpdateRecurringJobsInProvidedCache(namespace string, lhClient *lhcli
 	return recurringJobs, nil
 }
 
+// ListAndUpdateVolumeAttachmentsInProvidedCache list all volumeAttachments and save them into the provided cached `resourceMap`. This method is not thread-safe.
+func ListAndUpdateVolumeAttachmentsInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}) (map[string]*longhorn.VolumeAttachment, error) {
+	if v, ok := resourceMaps[types.LonghornKindVolumeAttachment]; ok {
+		return v.(map[string]*longhorn.VolumeAttachment), nil
+	}
+
+	volumeAttachments := map[string]*longhorn.VolumeAttachment{}
+	volumeAttachmentList, err := lhClient.LonghornV1beta2().VolumeAttachments(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	for i, volumeAttachment := range volumeAttachmentList.Items {
+		volumeAttachments[volumeAttachment.Name] = &volumeAttachmentList.Items[i]
+	}
+
+	resourceMaps[types.LonghornKindVolumeAttachment] = volumeAttachments
+
+	return volumeAttachments, nil
+}
+
 // CreateAndUpdateRecurringJobInProvidedCache creates a recurringJob and saves it into the provided cached `resourceMap`. This method is not thread-safe.
-func CreateAndUpdateRecurringJobInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}, job *longhorn.RecurringJob) (*v1beta2.RecurringJob, error) {
+func CreateAndUpdateRecurringJobInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}, job *longhorn.RecurringJob) (*longhorn.RecurringJob, error) {
 	obj, err := lhClient.LonghornV1beta2().RecurringJobs(namespace).Create(context.TODO(), job, metav1.CreateOptions{})
 	if err != nil {
 		return obj, err
 	}
 
-	var recurringJobs map[string]*v1beta2.RecurringJob
+	var recurringJobs map[string]*longhorn.RecurringJob
 	if v, ok := resourceMaps[types.LonghornKindRecurringJob]; ok {
-		recurringJobs = v.(map[string]*v1beta2.RecurringJob)
+		recurringJobs = v.(map[string]*longhorn.RecurringJob)
 	} else {
-		recurringJobs = map[string]*v1beta2.RecurringJob{}
+		recurringJobs = map[string]*longhorn.RecurringJob{}
 	}
 	recurringJobs[job.Name] = obj
 
@@ -584,17 +624,17 @@ func CreateAndUpdateRecurringJobInProvidedCache(namespace string, lhClient *lhcl
 }
 
 // CreateAndUpdateBackingImageInProvidedCache creates a backingImage and saves it into the provided cached `resourceMap`. This method is not thread-safe.
-func CreateAndUpdateBackingImageInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}, bid *longhorn.BackingImageDataSource) (*v1beta2.BackingImageDataSource, error) {
+func CreateAndUpdateBackingImageInProvidedCache(namespace string, lhClient *lhclientset.Clientset, resourceMaps map[string]interface{}, bid *longhorn.BackingImageDataSource) (*longhorn.BackingImageDataSource, error) {
 	obj, err := lhClient.LonghornV1beta2().BackingImageDataSources(namespace).Create(context.TODO(), bid, metav1.CreateOptions{})
 	if err != nil {
 		return obj, err
 	}
 
-	var bids map[string]*v1beta2.BackingImageDataSource
+	var bids map[string]*longhorn.BackingImageDataSource
 	if v, ok := resourceMaps[types.LonghornKindBackingImageDataSource]; ok {
-		bids = v.(map[string]*v1beta2.BackingImageDataSource)
+		bids = v.(map[string]*longhorn.BackingImageDataSource)
 	} else {
-		bids = map[string]*v1beta2.BackingImageDataSource{}
+		bids = map[string]*longhorn.BackingImageDataSource{}
 	}
 	bids[bid.Name] = obj
 
@@ -863,6 +903,15 @@ func updateSettings(namespace string, lhClient *lhclientset.Clientset, settings 
 		}
 
 		if !reflect.DeepEqual(existingSetting.Value, setting.Value) {
+			if setting.Annotations == nil {
+				setting.Annotations = make(map[string]string)
+			}
+			setting.Annotations[types.GetLonghornLabelKey(types.UpdateSettingFromLonghorn)] = ""
+			setting, err = lhClient.LonghornV1beta2().Settings(namespace).Update(context.TODO(), setting, metav1.UpdateOptions{})
+			if err != nil {
+				return err
+			}
+			delete(setting.Annotations, types.GetLonghornLabelKey(types.UpdateSettingFromLonghorn))
 			if _, err = lhClient.LonghornV1beta2().Settings(namespace).Update(context.TODO(), setting, metav1.UpdateOptions{}); err != nil {
 				return err
 			}
@@ -912,23 +961,21 @@ func updateOrphans(namespace string, lhClient *lhclientset.Clientset, orphans ma
 	return nil
 }
 
-func updateVolumeAttachments(namespace string, lhClient *lhclientset.Clientset, volumeAttachment map[string]*longhorn.VolumeAttachment) error {
+func updateVolumeAttachments(namespace string, lhClient *lhclientset.Clientset, volumeAttachments map[string]*longhorn.VolumeAttachment) error {
 	existingVolumeAttachmentList, err := lhClient.LonghornV1beta2().VolumeAttachments(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
-
-	existingVolumeAttachmentMap := map[string]bool{}
-	for _, volume := range existingVolumeAttachmentList.Items {
-		existingVolumeAttachmentMap[volume.Name] = true
-	}
-
-	for _, va := range volumeAttachment {
-		if _, ok := existingVolumeAttachmentMap[va.Name]; ok {
+	for _, existingVolumeAttachment := range existingVolumeAttachmentList.Items {
+		volumeAttachment, ok := volumeAttachments[existingVolumeAttachment.Name]
+		if !ok {
 			continue
 		}
-		if _, err = lhClient.LonghornV1beta2().VolumeAttachments(namespace).Create(context.TODO(), va, metav1.CreateOptions{}); err != nil {
-			return err
+		if !reflect.DeepEqual(existingVolumeAttachment.Spec, volumeAttachment.Spec) ||
+			!reflect.DeepEqual(existingVolumeAttachment.ObjectMeta, volumeAttachment.ObjectMeta) {
+			if _, err = lhClient.LonghornV1beta2().VolumeAttachments(namespace).Update(context.TODO(), volumeAttachment, metav1.UpdateOptions{}); err != nil {
+				return err
+			}
 		}
 	}
 

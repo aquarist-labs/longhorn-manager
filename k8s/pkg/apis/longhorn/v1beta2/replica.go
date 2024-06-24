@@ -10,7 +10,10 @@ const (
 )
 
 const (
-	ReplicaConditionTypeRebuildFailed = "RebuildFailed"
+	ReplicaConditionTypeRebuildFailed                = "RebuildFailed"
+	ReplicaConditionTypeWaitForBackingImage          = "WaitForBackingImage"
+	ReplicaConditionReasonWaitForBackingImageFailed  = "GetBackingImageFailed"
+	ReplicaConditionReasonWaitForBackingImageWaiting = "Waiting"
 
 	ReplicaConditionReasonRebuildFailedDisconnection = "Disconnection"
 	ReplicaConditionReasonRebuildFailedGeneral       = "General"
@@ -43,11 +46,14 @@ type ReplicaSpec struct {
 	UnmapMarkDiskChainRemovedEnabled bool `json:"unmapMarkDiskChainRemovedEnabled"`
 	// +optional
 	RebuildRetryCount int `json:"rebuildRetryCount"`
+	// +optional
+	EvictionRequested bool `json:"evictionRequested"`
 }
 
 // ReplicaStatus defines the observed state of the Longhorn replica
 type ReplicaStatus struct {
 	InstanceStatus `json:""`
+	// Deprecated: Replaced by field `spec.evictionRequested`.
 	// +optional
 	EvictionRequested bool `json:"evictionRequested"`
 }

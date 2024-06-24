@@ -11,20 +11,21 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
-	policyv1 "k8s.io/api/policy/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	clientset "k8s.io/client-go/kubernetes"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/controller"
+
+	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	imapi "github.com/longhorn/longhorn-instance-manager/pkg/api"
 
@@ -37,8 +38,8 @@ import (
 )
 
 var (
-	mountPropagationHostToContainer = v1.MountPropagationHostToContainer
-	mountPropagationBidirectional   = v1.MountPropagationBidirectional
+	mountPropagationHostToContainer = corev1.MountPropagationHostToContainer
+	mountPropagationBidirectional   = corev1.MountPropagationBidirectional
 )
 
 type InstanceManagerController struct {
@@ -76,7 +77,7 @@ type InstanceManagerMonitor struct {
 	// used to notify the controller that monitoring has stopped
 	monitorVoluntaryStopCh chan struct{}
 
-	nodeCallback func(obj interface{})
+	nodeCallback func(nodeName string)
 
 	client *engineapi.InstanceManagerClient
 }
@@ -118,7 +119,7 @@ func NewInstanceManagerController(
 		serviceAccount: serviceAccount,
 
 		kubeClient:    kubeClient,
-		eventRecorder: eventBroadcaster.NewRecorder(scheme, v1.EventSource{Component: "longhorn-instance-manager-controller"}),
+		eventRecorder: eventBroadcaster.NewRecorder(scheme, corev1.EventSource{Component: "longhorn-instance-manager-controller"}),
 
 		ds: ds,
 
@@ -182,7 +183,7 @@ func (imc *InstanceManagerController) isResponsibleForSetting(obj interface{}) b
 }
 
 func isInstanceManagerPod(obj interface{}) bool {
-	pod, ok := obj.(*v1.Pod)
+	pod, ok := obj.(*corev1.Pod)
 	if !ok {
 		deletedState, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
@@ -190,7 +191,7 @@ func isInstanceManagerPod(obj interface{}) bool {
 		}
 
 		// use the last known state, to enqueue, dependent objects
-		pod, ok = deletedState.Obj.(*v1.Pod)
+		pod, ok = deletedState.Obj.(*corev1.Pod)
 		if !ok {
 			return false
 		}
@@ -248,14 +249,15 @@ func (imc *InstanceManagerController) handleErr(err error, key interface{}) {
 		return
 	}
 
+	log := imc.logger.WithField("InstanceManager", key)
 	if imc.queue.NumRequeues(key) < maxRetries {
-		logrus.WithError(err).Errorf("Failed to sync Longhorn instance manager %v", key)
+		handleReconcileErrorLogging(log, err, "Failed to sync Longhorn instance manager")
 		imc.queue.AddRateLimited(key)
 		return
 	}
 
 	utilruntime.HandleError(err)
-	logrus.WithError(err).Errorf("Dropping Longhorn instance manager %v out of the queue", key)
+	handleReconcileErrorLogging(log, err, "Dropping Longhorn instance manager out of the queue")
 	imc.queue.Forget(key)
 }
 
@@ -323,17 +325,11 @@ func (imc *InstanceManagerController) syncInstanceManager(key string) (err error
 		}
 	}()
 
-	// Skip the cleanup when the node is suddenly down.
-	isDown, err := imc.ds.IsNodeDownOrDeleted(im.Spec.NodeID)
-	if err != nil {
-		log.WithError(err).Warnf("Failed to check IsNodeDownOrDeleted(%v) when syncing instance manager", im.Spec.NodeID)
-	}
-	if isDown {
-		im.Status.CurrentState = longhorn.InstanceManagerStateUnknown
-		return nil
+	if err := imc.syncStatusWithPod(im); err != nil {
+		return err
 	}
 
-	if err := imc.syncStatusWithPod(im); err != nil {
+	if err := imc.syncStatusWithNode(im); err != nil {
 		return err
 	}
 
@@ -372,7 +368,7 @@ func (imc *InstanceManagerController) syncStatusWithPod(im *longhorn.InstanceMan
 		}
 	}()
 
-	pod, err := imc.ds.GetPod(im.Name)
+	pod, err := imc.ds.GetPodRO(imc.namespace, im.Name)
 	if err != nil {
 		return errors.Wrapf(err, "failed get pod for instance manager %v", im.Name)
 	}
@@ -395,9 +391,9 @@ func (imc *InstanceManagerController) syncStatusWithPod(im *longhorn.InstanceMan
 
 	// Blindly update the state based on the pod phase.
 	switch pod.Status.Phase {
-	case v1.PodPending:
+	case corev1.PodPending:
 		im.Status.CurrentState = longhorn.InstanceManagerStateStarting
-	case v1.PodRunning:
+	case corev1.PodRunning:
 		isReady := true
 		// Make sure readiness probe has passed.
 		for _, st := range pod.Status.ContainerStatuses {
@@ -410,10 +406,25 @@ func (imc *InstanceManagerController) syncStatusWithPod(im *longhorn.InstanceMan
 		} else {
 			im.Status.CurrentState = longhorn.InstanceManagerStateStarting
 		}
-	case v1.PodUnknown:
-		im.Status.CurrentState = longhorn.InstanceManagerStateUnknown
 	default:
 		im.Status.CurrentState = longhorn.InstanceManagerStateError
+	}
+
+	return nil
+}
+
+func (imc *InstanceManagerController) syncStatusWithNode(im *longhorn.InstanceManager) error {
+	log := getLoggerForInstanceManager(imc.logger, im).WithField("node", im.Spec.NodeID)
+
+	isDown, err := imc.ds.IsNodeDownOrDeleted(im.Spec.NodeID)
+	if err != nil {
+		return err
+	}
+	if isDown {
+		if im.Status.CurrentState != longhorn.InstanceManagerStateError && im.Status.CurrentState != longhorn.InstanceManagerStateUnknown {
+			im.Status.CurrentState = longhorn.InstanceManagerStateUnknown
+			log.Infof("Updated the non-error instance manager to state %v due to node down or deleted", longhorn.InstanceManagerStateUnknown)
+		}
 	}
 
 	return nil
@@ -555,7 +566,7 @@ func (imc *InstanceManagerController) syncInstanceManagerPDB(im *longhorn.Instan
 		return err
 	}
 
-	imPDB, err := imc.ds.GetPDBRO(imc.getPDBName(im))
+	imPDB, err := imc.ds.GetPDBRO(types.GetPDBName(im))
 	if err != nil && !datastore.ErrorIsNotFound(err) {
 		return err
 	}
@@ -628,7 +639,7 @@ func (imc *InstanceManagerController) syncInstanceManagerPDB(im *longhorn.Instan
 }
 
 func (imc *InstanceManagerController) cleanUpPDBForNonExistingIM() error {
-	ims, err := imc.ds.ListInstanceManagers()
+	ims, err := imc.ds.ListInstanceManagersRO()
 	if err != nil {
 		if !datastore.ErrorIsNotFound(err) {
 			return err
@@ -636,7 +647,7 @@ func (imc *InstanceManagerController) cleanUpPDBForNonExistingIM() error {
 		ims = make(map[string]*longhorn.InstanceManager)
 	}
 
-	imPDBs, err := imc.ds.ListPDBs()
+	imPDBs, err := imc.ds.ListPDBsRO()
 	if err != nil {
 		if !datastore.ErrorIsNotFound(err) {
 			return err
@@ -655,7 +666,7 @@ func (imc *InstanceManagerController) cleanUpPDBForNonExistingIM() error {
 		if labelValue != types.LonghornLabelInstanceManager {
 			continue
 		}
-		if _, ok := ims[getIMNameFromPDBName(pdbName)]; ok {
+		if _, ok := ims[types.GetIMNameFromPDBName(pdbName)]; ok {
 			continue
 		}
 		if err := imc.ds.DeletePDB(pdbName); err != nil {
@@ -669,7 +680,7 @@ func (imc *InstanceManagerController) cleanUpPDBForNonExistingIM() error {
 }
 
 func (imc *InstanceManagerController) deleteInstanceManagerPDB(im *longhorn.InstanceManager) error {
-	name := imc.getPDBName(im)
+	name := types.GetPDBName(im)
 	imc.logger.Infof("Deleting %v PDB", name)
 	err := imc.ds.DeletePDB(name)
 	if err != nil && !datastore.ErrorIsNotFound(err) {
@@ -721,6 +732,11 @@ func (imc *InstanceManagerController) canDeleteInstanceManagerPDB(im *longhorn.I
 		return false, err
 	}
 
+	if nodeDrainingPolicy == string(types.NodeDrainPolicyBlockForEviction) && len(replicasOnCurrentNode) > 0 {
+		// We must wait for ALL replicas to be evicted before removing the PDB.
+		return false, nil
+	}
+
 	targetReplicas := []*longhorn.Replica{}
 	if nodeDrainingPolicy == string(types.NodeDrainPolicyAllowIfReplicaIsStopped) {
 		for _, replica := range replicasOnCurrentNode {
@@ -732,61 +748,30 @@ func (imc *InstanceManagerController) canDeleteInstanceManagerPDB(im *longhorn.I
 		targetReplicas = replicasOnCurrentNode
 	}
 
-	// For each replica in the target replica list,
-	// find out whether there is a PDB protected healthy replica of the same
-	// volume on another schedulable node.
+	// For each replica in the target replica list, find out whether there is a PDB protected healthy replica of the
+	// same volume on another schedulable node.
 	for _, replica := range targetReplicas {
-		vol, err := imc.ds.GetVolume(replica.Spec.VolumeName)
-		if err != nil {
-			return false, err
-		}
-
-		replicas, err := imc.ds.ListVolumeReplicas(vol.Name)
-		if err != nil {
-			return false, err
-		}
-
 		hasPDBOnAnotherNode := false
 		isUnusedReplicaOnCurrentNode := false
-		for _, r := range replicas {
-			hasOtherHealthyReplicas := r.Spec.HealthyAt != "" && r.Spec.FailedAt == "" && r.Spec.NodeID != im.Spec.NodeID
-			if hasOtherHealthyReplicas {
-				unschedulable, err := imc.ds.IsKubeNodeUnschedulable(r.Spec.NodeID)
-				if err != nil {
-					return false, err
-				}
-				if unschedulable {
-					continue
-				}
 
-				var rIM *longhorn.InstanceManager
-				rIM, err = imc.getRunningReplicaInstancManager(r)
-				if err != nil {
-					return false, err
-				}
-				if rIM == nil {
-					continue
-				}
-
-				pdb, err := imc.ds.GetPDBRO(imc.getPDBName(rIM))
-				if err != nil && !datastore.ErrorIsNotFound(err) {
-					return false, err
-				}
-				if pdb != nil {
-					hasPDBOnAnotherNode = true
-					break
-				}
-			}
-			// If a replica has never been started, there is no data stored in this replica, and
-			// retaining it makes no sense for HA.
-			// Hence Longhorn doesn't need to block the PDB removal for the replica.
-			// This case typically happens on a newly created volume that hasn't been attached to any node.
-			// https://github.com/longhorn/longhorn/issues/2673
-			isUnusedReplicaOnCurrentNode = r.Spec.HealthyAt == "" && r.Spec.FailedAt == "" && r.Spec.NodeID == im.Spec.NodeID
-			if isUnusedReplicaOnCurrentNode {
+		pdbProtectedHealthyReplicas, err := imc.ds.ListVolumePDBProtectedHealthyReplicasRO(replica.Spec.VolumeName)
+		if err != nil {
+			return false, err
+		}
+		for _, pdbProtectedHealthyReplica := range pdbProtectedHealthyReplicas {
+			if pdbProtectedHealthyReplica.Spec.NodeID != im.Spec.NodeID {
+				hasPDBOnAnotherNode = true
 				break
 			}
 		}
+
+		// If a replica has never been started, there is no data stored in this replica, and retaining it makes no sense
+		// for HA. Hence Longhorn doesn't need to block the PDB removal for the replica. This case typically happens on
+		// a newly created volume that hasn't been attached to any node.
+		// https://github.com/longhorn/longhorn/issues/2673
+		isUnusedReplicaOnCurrentNode = replica.Spec.HealthyAt == "" &&
+			replica.Spec.FailedAt == "" &&
+			replica.Spec.NodeID == im.Spec.NodeID
 
 		if !hasPDBOnAnotherNode && !isUnusedReplicaOnCurrentNode {
 			return false, nil
@@ -794,24 +779,6 @@ func (imc *InstanceManagerController) canDeleteInstanceManagerPDB(im *longhorn.I
 	}
 
 	return true, nil
-}
-
-func (imc *InstanceManagerController) getRunningReplicaInstancManager(r *longhorn.Replica) (im *longhorn.InstanceManager, err error) {
-	if r.Status.InstanceManagerName == "" {
-		im, err = imc.ds.GetInstanceManagerByInstance(r)
-		if err != nil && !types.ErrorIsNotFound(err) {
-			return nil, err
-		}
-	} else {
-		im, err = imc.ds.GetInstanceManager(r.Status.InstanceManagerName)
-		if err != nil && !apierrors.IsNotFound(err) {
-			return nil, err
-		}
-	}
-	if im == nil || im.Status.CurrentState != longhorn.InstanceManagerStateRunning {
-		return nil, nil
-	}
-	return im, nil
 }
 
 func (imc *InstanceManagerController) areAllVolumesDetachedFromNode(nodeName string) (bool, error) {
@@ -831,7 +798,7 @@ func (imc *InstanceManagerController) areAllVolumesDetachedFromNode(nodeName str
 }
 
 func (imc *InstanceManagerController) areAllInstanceRemovedFromNodeByType(nodeName string, imType longhorn.InstanceManagerType) (bool, error) {
-	ims, err := imc.ds.ListInstanceManagersByNode(nodeName, imType)
+	ims, err := imc.ds.ListInstanceManagersByNodeRO(nodeName, imType)
 	if err != nil {
 		if datastore.ErrorIsNotFound(err) {
 			return true, nil
@@ -863,7 +830,7 @@ func (imc *InstanceManagerController) createInstanceManagerPDB(im *longhorn.Inst
 func (imc *InstanceManagerController) generateInstanceManagerPDBManifest(im *longhorn.InstanceManager) *policyv1.PodDisruptionBudget {
 	return &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      imc.getPDBName(im),
+			Name:      types.GetPDBName(im),
 			Namespace: imc.namespace,
 		},
 		Spec: policyv1.PodDisruptionBudgetSpec{
@@ -873,18 +840,6 @@ func (imc *InstanceManagerController) generateInstanceManagerPDBManifest(im *lon
 			MinAvailable: &intstr.IntOrString{IntVal: 1},
 		},
 	}
-}
-
-func (imc *InstanceManagerController) getPDBName(im *longhorn.InstanceManager) string {
-	return getPDBNameFromIMName(im.Name)
-}
-
-func getPDBNameFromIMName(imName string) string {
-	return imName
-}
-
-func getIMNameFromPDBName(pdbName string) string {
-	return pdbName
 }
 
 func (imc *InstanceManagerController) enqueueInstanceManager(instanceManager interface{}) {
@@ -898,7 +853,7 @@ func (imc *InstanceManagerController) enqueueInstanceManager(instanceManager int
 }
 
 func (imc *InstanceManagerController) enqueueInstanceManagerPod(obj interface{}) {
-	pod, ok := obj.(*v1.Pod)
+	pod, ok := obj.(*corev1.Pod)
 	if !ok {
 		deletedState, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
@@ -907,14 +862,14 @@ func (imc *InstanceManagerController) enqueueInstanceManagerPod(obj interface{})
 		}
 
 		// use the last known state, to enqueue, dependent objects
-		pod, ok = deletedState.Obj.(*v1.Pod)
+		pod, ok = deletedState.Obj.(*corev1.Pod)
 		if !ok {
 			utilruntime.HandleError(fmt.Errorf("DeletedFinalStateUnknown contained invalid object: %#v", deletedState.Obj))
 			return
 		}
 	}
 
-	im, err := imc.ds.GetInstanceManager(pod.Name)
+	im, err := imc.ds.GetInstanceManagerRO(pod.Name)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return
@@ -926,7 +881,7 @@ func (imc *InstanceManagerController) enqueueInstanceManagerPod(obj interface{})
 }
 
 func (imc *InstanceManagerController) enqueueKubernetesNode(obj interface{}) {
-	kubernetesNode, ok := obj.(*v1.Node)
+	kubernetesNode, ok := obj.(*corev1.Node)
 	if !ok {
 		deletedState, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
@@ -935,26 +890,30 @@ func (imc *InstanceManagerController) enqueueKubernetesNode(obj interface{}) {
 		}
 
 		// use the last known state, to enqueue, dependent objects
-		kubernetesNode, ok = deletedState.Obj.(*v1.Node)
+		kubernetesNode, ok = deletedState.Obj.(*corev1.Node)
 		if !ok {
 			utilruntime.HandleError(fmt.Errorf("DeletedFinalStateUnknown contained invalid object: %#v", deletedState.Obj))
 			return
 		}
 	}
 
-	node, err := imc.ds.GetNode(kubernetesNode.Name)
+	imc.enqueueInstanceManagersForNode(kubernetesNode.Name)
+}
+
+func (imc *InstanceManagerController) enqueueInstanceManagersForNode(nodeName string) {
+	node, err := imc.ds.GetNodeRO(nodeName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			// there is no Longhorn node created for the Kubernetes
 			// node (e.g. controller/etcd node). Skip it
 			return
 		}
-		utilruntime.HandleError(fmt.Errorf("failed to get node %v: %v ", kubernetesNode.Name, err))
+		utilruntime.HandleError(fmt.Errorf("failed to get node %v: %v ", nodeName, err))
 		return
 	}
 
 	for _, imType := range []longhorn.InstanceManagerType{longhorn.InstanceManagerTypeEngine, longhorn.InstanceManagerTypeReplica, longhorn.InstanceManagerTypeAllInOne} {
-		ims, err := imc.ds.ListInstanceManagersByNode(node.Name, imType)
+		ims, err := imc.ds.ListInstanceManagersByNodeRO(node.Name, imType)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				return
@@ -970,19 +929,13 @@ func (imc *InstanceManagerController) enqueueKubernetesNode(obj interface{}) {
 }
 
 func (imc *InstanceManagerController) enqueueSettingChange(obj interface{}) {
-	node, err := imc.ds.GetNode(imc.controllerID)
-	if err != nil {
-		utilruntime.HandleError(errors.Wrapf(err, "failed to get node %v for instance manager", imc.controllerID))
-		return
-	}
-
-	imc.enqueueKubernetesNode(node)
+	imc.enqueueInstanceManagersForNode(imc.controllerID)
 }
 
 func (imc *InstanceManagerController) cleanupInstanceManager(imName string) error {
 	imc.stopMonitoring(imName)
 
-	pod, err := imc.ds.GetPod(imName)
+	pod, err := imc.ds.GetPodRO(imc.namespace, imName)
 	if err != nil {
 		return err
 	}
@@ -1009,20 +962,20 @@ func (imc *InstanceManagerController) createInstanceManagerPod(im *longhorn.Inst
 		return errors.Wrap(err, "failed to get node selector setting before creating instance manager pod")
 	}
 
-	registrySecretSetting, err := imc.ds.GetSetting(types.SettingNameRegistrySecret)
+	registrySecretSetting, err := imc.ds.GetSettingWithAutoFillingRO(types.SettingNameRegistrySecret)
 	if err != nil {
 		return errors.Wrap(err, "failed to get registry secret setting before creating instance manager pod")
 	}
 
 	registrySecret := registrySecretSetting.Value
 
-	var podSpec *v1.Pod
+	var podSpec *corev1.Pod
 	podSpec, err = imc.createInstanceManagerPodSpec(im, tolerations, registrySecret, nodeSelector)
 	if err != nil {
 		return err
 	}
 
-	storageNetwork, err := imc.ds.GetSetting(types.SettingNameStorageNetwork)
+	storageNetwork, err := imc.ds.GetSettingWithAutoFillingRO(types.SettingNameStorageNetwork)
 	if err != nil {
 		return err
 	}
@@ -1043,13 +996,13 @@ func (imc *InstanceManagerController) createInstanceManagerPod(im *longhorn.Inst
 	return nil
 }
 
-func (imc *InstanceManagerController) createGenericManagerPodSpec(im *longhorn.InstanceManager, tolerations []v1.Toleration, registrySecret string, nodeSelector map[string]string) (*v1.Pod, error) {
+func (imc *InstanceManagerController) createGenericManagerPodSpec(im *longhorn.InstanceManager, tolerations []corev1.Toleration, registrySecret string, nodeSelector map[string]string) (*corev1.Pod, error) {
 	tolerationsByte, err := json.Marshal(tolerations)
 	if err != nil {
 		return nil, err
 	}
 
-	priorityClass, err := imc.ds.GetSetting(types.SettingNamePriorityClass)
+	priorityClass, err := imc.ds.GetSettingWithAutoFillingRO(types.SettingNamePriorityClass)
 	if err != nil {
 		return nil, err
 	}
@@ -1060,25 +1013,25 @@ func (imc *InstanceManagerController) createGenericManagerPodSpec(im *longhorn.I
 	}
 
 	privileged := true
-	podSpec := &v1.Pod{
+	podSpec := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            im.Name,
 			Namespace:       imc.namespace,
 			OwnerReferences: datastore.GetOwnerReferencesForInstanceManager(im),
 			Annotations:     map[string]string{types.GetLonghornLabelKey(types.LastAppliedTolerationAnnotationKeySuffix): string(tolerationsByte)},
 		},
-		Spec: v1.PodSpec{
+		Spec: corev1.PodSpec{
 			ServiceAccountName: imc.serviceAccount,
 			Tolerations:        util.GetDistinctTolerations(tolerations),
 			NodeSelector:       nodeSelector,
 			PriorityClassName:  priorityClass.Value,
-			Containers: []v1.Container{
+			Containers: []corev1.Container{
 				{
 					Image:           im.Spec.Image,
 					ImagePullPolicy: imagePullPolicy,
-					LivenessProbe: &v1.Probe{
-						ProbeHandler: v1.ProbeHandler{
-							TCPSocket: &v1.TCPSocketAction{
+					LivenessProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							TCPSocket: &corev1.TCPSocketAction{
 								Port: intstr.FromInt(engineapi.InstanceManagerProcessManagerServiceDefaultPort),
 							},
 						},
@@ -1087,18 +1040,18 @@ func (imc *InstanceManagerController) createGenericManagerPodSpec(im *longhorn.I
 						PeriodSeconds:       datastore.PodProbePeriodSeconds,
 						FailureThreshold:    datastore.PodLivenessProbeFailureThreshold,
 					},
-					SecurityContext: &v1.SecurityContext{
+					SecurityContext: &corev1.SecurityContext{
 						Privileged: &privileged,
 					},
 				},
 			},
 			NodeName:      im.Spec.NodeID,
-			RestartPolicy: v1.RestartPolicyNever,
+			RestartPolicy: corev1.RestartPolicyNever,
 		},
 	}
 
 	if registrySecret != "" {
-		podSpec.Spec.ImagePullSecrets = []v1.LocalObjectReference{
+		podSpec.Spec.ImagePullSecrets = []corev1.LocalObjectReference{
 			{
 				Name: registrySecret,
 			},
@@ -1118,7 +1071,7 @@ func (imc *InstanceManagerController) createGenericManagerPodSpec(im *longhorn.I
 	return podSpec, nil
 }
 
-func (imc *InstanceManagerController) createInstanceManagerPodSpec(im *longhorn.InstanceManager, tolerations []v1.Toleration, registrySecret string, nodeSelector map[string]string) (*v1.Pod, error) {
+func (imc *InstanceManagerController) createInstanceManagerPodSpec(im *longhorn.InstanceManager, tolerations []corev1.Toleration, registrySecret string, nodeSelector map[string]string) (*corev1.Pod, error) {
 	podSpec, err := imc.createGenericManagerPodSpec(im, tolerations, registrySecret, nodeSelector)
 	if err != nil {
 		return nil, err
@@ -1128,7 +1081,7 @@ func (imc *InstanceManagerController) createInstanceManagerPodSpec(im *longhorn.
 	podSpec.ObjectMeta.Labels = types.GetInstanceManagerLabels(imc.controllerID, im.Spec.Image, longhorn.InstanceManagerTypeAllInOne)
 	podSpec.Spec.Containers[0].Name = "instance-manager"
 
-	v2DataEngineEnabled, err := imc.ds.GetSetting(types.SettingNameV2DataEngine)
+	v2DataEngineEnabled, err := imc.ds.GetSettingWithAutoFillingRO(types.SettingNameV2DataEngine)
 	if err != nil {
 		return nil, err
 	}
@@ -1148,35 +1101,35 @@ func (imc *InstanceManagerController) createInstanceManagerPodSpec(im *longhorn.
 		}
 
 		if podSpec.Spec.Containers[0].Resources.Requests == nil {
-			podSpec.Spec.Containers[0].Resources.Requests = v1.ResourceList{}
+			podSpec.Spec.Containers[0].Resources.Requests = corev1.ResourceList{}
 		}
-		podSpec.Spec.Containers[0].Resources.Requests[v1.ResourceMemory] = resource.MustParse("128Mi")
+		podSpec.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory] = resource.MustParse("128Mi")
 
 		if podSpec.Spec.Containers[0].Resources.Limits == nil {
-			podSpec.Spec.Containers[0].Resources.Limits = v1.ResourceList{}
+			podSpec.Spec.Containers[0].Resources.Limits = corev1.ResourceList{}
 		}
-		podSpec.Spec.Containers[0].Resources.Limits[v1.ResourceName("hugepages-2Mi")] = resource.MustParse(fmt.Sprintf("%vMi", hugepage))
+		podSpec.Spec.Containers[0].Resources.Limits[corev1.ResourceName("hugepages-2Mi")] = resource.MustParse(fmt.Sprintf("%vMi", hugepage))
 	} else {
 		podSpec.Spec.Containers[0].Args = []string{
 			"instance-manager", "--debug", "daemon", "--listen", fmt.Sprintf("0.0.0.0:%d", engineapi.InstanceManagerProcessManagerServiceDefaultPort),
 		}
 	}
 
-	podSpec.Spec.Containers[0].Env = []v1.EnvVar{
+	podSpec.Spec.Containers[0].Env = []corev1.EnvVar{
 		{
 			Name:  "TLS_DIR",
 			Value: types.TLSDirectoryInContainer,
 		},
 		{
 			Name: types.EnvPodIP,
-			ValueFrom: &v1.EnvVarSource{
-				FieldRef: &v1.ObjectFieldSelector{
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
 					FieldPath: "status.podIP",
 				},
 			},
 		},
 	}
-	podSpec.Spec.Containers[0].VolumeMounts = []v1.VolumeMount{
+	podSpec.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
 		{
 			MountPath:        "/host",
 			Name:             "host",
@@ -1196,35 +1149,35 @@ func (imc *InstanceManagerController) createInstanceManagerPodSpec(im *longhorn.
 			Name:      "longhorn-grpc-tls",
 		},
 	}
-	podSpec.Spec.Volumes = []v1.Volume{
+	podSpec.Spec.Volumes = []corev1.Volume{
 		{
 			Name: "host",
-			VolumeSource: v1.VolumeSource{
-				HostPath: &v1.HostPathVolumeSource{
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
 					Path: "/",
 				},
 			},
 		},
 		{
 			Name: "engine-binaries",
-			VolumeSource: v1.VolumeSource{
-				HostPath: &v1.HostPathVolumeSource{
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
 					Path: types.EngineBinaryDirectoryOnHost,
 				},
 			},
 		},
 		{
 			Name: "unix-domain-socket",
-			VolumeSource: v1.VolumeSource{
-				HostPath: &v1.HostPathVolumeSource{
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
 					Path: types.UnixDomainSocketDirectoryOnHost,
 				},
 			},
 		},
 		{
 			Name: "longhorn-grpc-tls",
-			VolumeSource: v1.VolumeSource{
-				Secret: &v1.SecretVolumeSource{
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
 					SecretName: types.TLSSecretName,
 					Optional:   &secretIsOptional,
 				},
@@ -1233,20 +1186,21 @@ func (imc *InstanceManagerController) createInstanceManagerPodSpec(im *longhorn.
 	}
 
 	if v2DataEngineEnabled.Value == "true" {
-		podSpec.Spec.Containers[0].VolumeMounts = append(podSpec.Spec.Containers[0].VolumeMounts, v1.VolumeMount{
+		podSpec.Spec.Containers[0].VolumeMounts = append(podSpec.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
 			MountPath: "/hugepages",
 			Name:      "hugepage",
 		})
 
-		podSpec.Spec.Volumes = append(podSpec.Spec.Volumes, v1.Volume{
+		podSpec.Spec.Volumes = append(podSpec.Spec.Volumes, corev1.Volume{
 			Name: "hugepage",
-			VolumeSource: v1.VolumeSource{
-				EmptyDir: &v1.EmptyDirVolumeSource{
-					Medium: v1.StorageMediumHugePages,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{
+					Medium: corev1.StorageMediumHugePages,
 				},
 			},
 		})
 	}
+	types.AddGoCoverDirToPod(podSpec)
 
 	return podSpec, nil
 }
@@ -1288,7 +1242,7 @@ func (imc *InstanceManagerController) startMonitoring(im *longhorn.InstanceManag
 		updateNotification: true,
 		client:             client,
 
-		nodeCallback: imc.enqueueKubernetesNode,
+		nodeCallback: imc.enqueueInstanceManagersForNode,
 	}
 
 	imc.instanceManagerMonitorMap[im.Name] = stopCh
@@ -1448,13 +1402,7 @@ func (m *InstanceManagerMonitor) pollAndUpdateInstanceMap() (needStop bool) {
 	// replica IM PDB in this case. So enqueue the node IMs again to sync replica
 	// IM PDB.
 	if clusterAutoscalerEnabled && im.Spec.Type == longhorn.InstanceManagerTypeEngine {
-		node, err := m.ds.GetNode(m.controllerID)
-		if err != nil {
-			utilruntime.HandleError(errors.Wrapf(err, "failed to get node for instance manager %v", m.Name))
-			return false
-		}
-
-		m.nodeCallback(node)
+		m.nodeCallback(m.controllerID)
 	}
 
 	return false

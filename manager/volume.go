@@ -8,16 +8,18 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/engineapi"
-	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	"github.com/longhorn/longhorn-manager/scheduler"
 	"github.com/longhorn/longhorn-manager/types"
 	"github.com/longhorn/longhorn-manager/util"
+
+	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 )
 
 type VolumeManager struct {
@@ -158,7 +160,7 @@ func (m *VolumeManager) Create(name string, spec *longhorn.VolumeSpec, recurring
 			Migratable:                  spec.Migratable,
 			Encrypted:                   spec.Encrypted,
 			Frontend:                    spec.Frontend,
-			EngineImage:                 "",
+			Image:                       "",
 			FromBackup:                  spec.FromBackup,
 			RestoreVolumeRecurringJob:   spec.RestoreVolumeRecurringJob,
 			DataSource:                  spec.DataSource,
@@ -176,6 +178,7 @@ func (m *VolumeManager) Create(name string, spec *longhorn.VolumeSpec, recurring
 			UnmapMarkSnapChainRemoved:   spec.UnmapMarkSnapChainRemoved,
 			ReplicaSoftAntiAffinity:     spec.ReplicaSoftAntiAffinity,
 			ReplicaZoneSoftAntiAffinity: spec.ReplicaZoneSoftAntiAffinity,
+			ReplicaDiskSoftAntiAffinity: spec.ReplicaDiskSoftAntiAffinity,
 			BackendStoreDriver:          spec.BackendStoreDriver,
 			OfflineReplicaRebuilding:    spec.OfflineReplicaRebuilding,
 		},
@@ -216,11 +219,11 @@ func (m *VolumeManager) Attach(name, nodeID string, disableFrontend bool, attach
 		return nil, err
 	}
 
-	if isReady, err := m.ds.CheckEngineImageReadyOnAtLeastOneVolumeReplica(v.Spec.EngineImage, v.Name, node.Name, v.Spec.DataLocality); !isReady {
+	if isReady, err := m.ds.CheckEngineImageReadyOnAtLeastOneVolumeReplica(v.Spec.Image, v.Name, node.Name, v.Spec.DataLocality); !isReady {
 		if err != nil {
-			return nil, errors.Wrapf(err, "cannot attach volume %v with image %v", v.Name, v.Spec.EngineImage)
+			return nil, errors.Wrapf(err, "cannot attach volume %v with image %v", v.Name, v.Spec.Image)
 		}
-		return nil, fmt.Errorf("cannot attach volume %v because the engine image %v is not deployed on at least one of the the replicas' nodes or the node that the volume is going to attach to", v.Name, v.Spec.EngineImage)
+		return nil, fmt.Errorf("cannot attach volume %v because the image %v is not deployed on at least one of the the replicas' nodes or the node that the volume is going to attach to", v.Name, v.Spec.Image)
 	}
 
 	restoreCondition := types.GetCondition(v.Status.Conditions, longhorn.VolumeConditionTypeRestore)
@@ -630,13 +633,22 @@ func (m *VolumeManager) trimRWXVolumeFilesystem(volumeName string, encryptedDevi
 	}
 	pod, err := m.ds.GetPodRO(sm.Namespace, types.GetShareManagerPodNameFromShareManagerName(sm.Name))
 	if err != nil {
-		return errors.Wrapf(err, "failed to get share manager pod for trimming volume %v in namespae", volumeName)
+		return errors.Wrapf(err, "failed to get share manager pod for trimming volume %v in namespace", volumeName)
 	}
+	if pod == nil {
+		return fmt.Errorf("share manager pod is not found for trimming volume %v in namespace", volumeName)
+	}
+
+	if sm.Status.State != longhorn.ShareManagerStateRunning {
+		return fmt.Errorf("share manager %v is not running", sm.Name)
+	}
+
 	client, err := engineapi.NewShareManagerClient(sm, pod)
 	if err != nil {
 		return errors.Wrapf(err, "failed to launch gRPC client for share manager before trimming volume %v", volumeName)
 	}
 	defer client.Close()
+
 	return client.FilesystemTrim(encryptedDevice)
 }
 
@@ -706,7 +718,7 @@ func (m *VolumeManager) DeleteReplica(volumeName, replicaName string) error {
 		if !datastore.IsAvailableHealthyReplica(r) {
 			continue
 		}
-		if r.Status.EvictionRequested {
+		if r.Spec.EvictionRequested {
 			continue
 		}
 		healthyReplica = r.Name
@@ -766,28 +778,28 @@ func (m *VolumeManager) EngineUpgrade(volumeName, image string) (v *longhorn.Vol
 		return nil, err
 	}
 
-	if v.Spec.EngineImage == image {
+	if v.Spec.Image == image {
 		return nil, fmt.Errorf("upgrading in process for volume %v engine image from %v to %v already",
-			v.Name, v.Status.CurrentImage, v.Spec.EngineImage)
+			v.Name, v.Status.CurrentImage, v.Spec.Image)
 	}
 
-	if v.Spec.EngineImage != v.Status.CurrentImage && image != v.Status.CurrentImage {
+	if v.Spec.Image != v.Status.CurrentImage && image != v.Status.CurrentImage {
 		return nil, fmt.Errorf("upgrading in process for volume %v engine image from %v to %v, cannot upgrade to another engine image",
-			v.Name, v.Status.CurrentImage, v.Spec.EngineImage)
+			v.Name, v.Status.CurrentImage, v.Spec.Image)
 	}
 
 	if isReady, err := m.ds.CheckEngineImageReadyOnAllVolumeReplicas(image, v.Name, v.Status.CurrentNodeID); !isReady {
 		if err != nil {
-			return nil, fmt.Errorf("cannot upgrade engine image for volume %v from image %v to image %v: %v", v.Name, v.Spec.EngineImage, image, err)
+			return nil, fmt.Errorf("cannot upgrade engine image for volume %v from image %v to image %v: %v", v.Name, v.Spec.Image, image, err)
 		}
-		return nil, fmt.Errorf("cannot upgrade engine image for volume %v from image %v to image %v because the engine image %v is not deployed on the replicas' nodes or the node that the volume is attached to", v.Name, v.Spec.EngineImage, image, image)
+		return nil, fmt.Errorf("cannot upgrade engine image for volume %v from image %v to image %v because the engine image %v is not deployed on the replicas' nodes or the node that the volume is attached to", v.Name, v.Spec.Image, image, image)
 	}
 
 	if isReady, err := m.ds.CheckEngineImageReadyOnAllVolumeReplicas(v.Status.CurrentImage, v.Name, v.Status.CurrentNodeID); !isReady {
 		if err != nil {
-			return nil, fmt.Errorf("cannot upgrade engine image for volume %v from image %v to image %v: %v", v.Name, v.Spec.EngineImage, image, err)
+			return nil, fmt.Errorf("cannot upgrade engine image for volume %v from image %v to image %v: %v", v.Name, v.Spec.Image, image, err)
 		}
-		return nil, fmt.Errorf("cannot upgrade engine image for volume %v from image %v to image %v because the volume's current engine image %v is not deployed on the replicas' nodes or the node that the volume is attached to", v.Name, v.Spec.EngineImage, image, v.Status.CurrentImage)
+		return nil, fmt.Errorf("cannot upgrade engine image for volume %v from image %v to image %v because the volume's current engine image %v is not deployed on the replicas' nodes or the node that the volume is attached to", v.Name, v.Spec.Image, image, v.Status.CurrentImage)
 	}
 
 	if v.Spec.MigrationNodeID != "" {
@@ -800,15 +812,15 @@ func (m *VolumeManager) EngineUpgrade(volumeName, image string) (v *longhorn.Vol
 		return nil, fmt.Errorf("cannot do live upgrade for a unhealthy volume %v", v.Name)
 	}
 
-	oldImage := v.Spec.EngineImage
-	v.Spec.EngineImage = image
+	oldImage := v.Spec.Image
+	v.Spec.Image = image
 
 	v, err = m.ds.UpdateVolume(v)
 	if err != nil {
 		return nil, err
 	}
 	if image != v.Status.CurrentImage {
-		logrus.Infof("Upgrading volume %v engine image from %v to %v", v.Name, oldImage, v.Spec.EngineImage)
+		logrus.Infof("Upgrading volume %v engine image from %v to %v", v.Name, oldImage, v.Spec.Image)
 	} else {
 		logrus.Infof("Rolling back volume %v engine image to %v", v.Name, v.Status.CurrentImage)
 	}
@@ -829,7 +841,7 @@ func (m *VolumeManager) UpdateReplicaCount(name string, count int) (v *longhorn.
 	if v.Spec.NodeID == "" || v.Status.State != longhorn.VolumeStateAttached {
 		return nil, fmt.Errorf("invalid volume state to update replica count%v", v.Status.State)
 	}
-	if v.Spec.EngineImage != v.Status.CurrentImage {
+	if v.Spec.Image != v.Status.CurrentImage {
 		return nil, fmt.Errorf("upgrading in process, cannot update replica count")
 	}
 	if v.Spec.MigrationNodeID != "" {
@@ -1067,6 +1079,32 @@ func (m *VolumeManager) UpdateReplicaZoneSoftAntiAffinity(name string, replicaZo
 	}
 
 	logrus.Infof("Updated volume %v field ReplicaZoneSoftAntiAffinity from %v to %v", v.Name, oldReplicaZoneSoftAntiAffinity, replicaZoneSoftAntiAffinity)
+	return v, nil
+}
+
+func (m *VolumeManager) UpdateReplicaDiskSoftAntiAffinity(name string, replicaDiskSoftAntiAffinity longhorn.ReplicaDiskSoftAntiAffinity) (v *longhorn.Volume, err error) {
+	defer func() {
+		err = errors.Wrapf(err, "unable to update field ReplicaDiskSoftAntiAffinity for volume %v", name)
+	}()
+
+	v, err = m.ds.GetVolume(name)
+	if err != nil {
+		return nil, err
+	}
+
+	if v.Spec.ReplicaDiskSoftAntiAffinity == replicaDiskSoftAntiAffinity {
+		logrus.Debugf("Volume %v already set field ReplicaDiskSoftAntiAffinity to %v", v.Name, replicaDiskSoftAntiAffinity)
+		return v, nil
+	}
+
+	oldReplicaDiskSoftAntiAffinity := v.Spec.ReplicaDiskSoftAntiAffinity
+	v.Spec.ReplicaDiskSoftAntiAffinity = replicaDiskSoftAntiAffinity
+	v, err = m.ds.UpdateVolume(v)
+	if err != nil {
+		return nil, err
+	}
+
+	logrus.Infof("Updated volume %v field ReplicaDiskSoftAntiAffinity from %v to %v", v.Name, oldReplicaDiskSoftAntiAffinity, replicaDiskSoftAntiAffinity)
 	return v, nil
 }
 

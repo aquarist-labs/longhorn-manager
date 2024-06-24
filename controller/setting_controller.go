@@ -195,14 +195,15 @@ func (sc *SettingController) handleErr(err error, key interface{}) {
 		return
 	}
 
+	log := sc.logger.WithField("Setting", key)
 	if sc.queue.NumRequeues(key) < maxRetries {
-		sc.logger.WithError(err).Errorf("Failed to sync Longhorn setting %v", key)
+		handleReconcileErrorLogging(log, err, "Failed to sync Longhorn setting")
 		sc.queue.AddRateLimited(key)
 		return
 	}
 
 	utilruntime.HandleError(err)
-	sc.logger.WithError(err).Errorf("Dropping Longhorn setting %v out of the queue", key)
+	handleReconcileErrorLogging(log, err, "Dropping Longhorn setting out of the queue")
 	sc.queue.Forget(key)
 }
 
@@ -268,7 +269,7 @@ func (sc *SettingController) syncSetting(key string) (err error) {
 
 // getResponsibleNodeID returns which node need to run
 func getResponsibleNodeID(ds *datastore.DataStore) (string, error) {
-	readyNodes, err := ds.ListReadyNodes()
+	readyNodes, err := ds.ListReadyNodesRO()
 	if err != nil {
 		return "", err
 	}
@@ -309,12 +310,12 @@ func (sc *SettingController) syncBackupTarget() (err error) {
 	}
 
 	// Get settings
-	targetSetting, err := sc.ds.GetSetting(types.SettingNameBackupTarget)
+	targetSetting, err := sc.ds.GetSettingWithAutoFillingRO(types.SettingNameBackupTarget)
 	if err != nil {
 		return err
 	}
 
-	secretSetting, err := sc.ds.GetSetting(types.SettingNameBackupTargetCredentialSecret)
+	secretSetting, err := sc.ds.GetSettingWithAutoFillingRO(types.SettingNameBackupTargetCredentialSecret)
 	if err != nil {
 		return err
 	}
@@ -358,6 +359,9 @@ func (sc *SettingController) syncBackupTarget() (err error) {
 			if _, err = sc.ds.UpdateBackupTarget(backupTarget); err != nil && !apierrors.IsConflict(errors.Cause(err)) {
 				sc.logger.WithError(err).Warn("Failed to update backup target")
 			}
+			if err = sc.handleSecretsForAWSIAMRoleAnnotation(backupTarget.Spec.BackupTargetURL, existingBackupTarget.Spec.CredentialSecret, secretSetting.Value, existingBackupTarget.Spec.BackupTargetURL != targetSetting.Value); err != nil {
+				sc.logger.WithError(err).Warn("Failed to update secrets for AWSIAMRoleAnnotation")
+			}
 		}
 	}()
 
@@ -389,8 +393,97 @@ func (sc *SettingController) syncBackupTarget() (err error) {
 	return nil
 }
 
+func (sc *SettingController) handleSecretsForAWSIAMRoleAnnotation(backupTargetURL, oldSecretName, newSecretName string, isBackupTargetURLChanged bool) (err error) {
+	isSameSecretName := oldSecretName == newSecretName
+	if isSameSecretName && !isBackupTargetURLChanged {
+		return nil
+	}
+
+	isArnExists := false
+	if !isSameSecretName {
+		isArnExists, _, err = sc.updateSecretForAWSIAMRoleAnnotation(backupTargetURL, oldSecretName, true)
+		if err != nil {
+			return err
+		}
+	}
+	_, isValidSecret, err := sc.updateSecretForAWSIAMRoleAnnotation(backupTargetURL, newSecretName, false)
+	if err != nil {
+		return err
+	}
+	// kubernetes_secret_controller will not reconcile the secret that does not exist such as named "", so we remove AWS IAM role annotation of pods if new secret name is "".
+	if !isValidSecret && isArnExists {
+		if err = sc.removePodsAWSIAMRoleAnnotation(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// updateSecretForAWSIAMRoleAnnotation adds the AWS IAM Role annotation to make an update to reconcile in kubernetes secret controller and returns
+//
+//	isArnExists = true if annotation had been added to the secret for first parameter,
+//	isValidSecret = true if this secret is valid for second parameter.
+//	err != nil if there is an error occurred.
+func (sc *SettingController) updateSecretForAWSIAMRoleAnnotation(backupTargetURL, secretName string, isOldSecret bool) (isArnExists bool, isValidSecret bool, err error) {
+	if secretName == "" {
+		return false, false, nil
+	}
+
+	secret, err := sc.ds.GetSecret(sc.namespace, secretName)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+
+	if isOldSecret {
+		delete(secret.Annotations, types.GetLonghornLabelKey(string(types.SettingNameBackupTarget)))
+		isArnExists = secret.Data[types.AWSIAMRoleArn] != nil
+	} else {
+		if secret.Annotations == nil {
+			secret.Annotations = make(map[string]string)
+		}
+		secret.Annotations[types.GetLonghornLabelKey(string(types.SettingNameBackupTarget))] = backupTargetURL
+	}
+
+	if _, err = sc.ds.UpdateSecret(sc.namespace, secret); err != nil {
+		return false, false, err
+	}
+	return isArnExists, true, nil
+}
+
+func (sc *SettingController) removePodsAWSIAMRoleAnnotation() error {
+	managerPods, err := sc.ds.ListManagerPods()
+	if err != nil {
+		return err
+	}
+
+	instanceManagerPods, err := sc.ds.ListInstanceManagerPods()
+	if err != nil {
+		return err
+	}
+	pods := append(managerPods, instanceManagerPods...)
+
+	for _, pod := range pods {
+		_, exist := pod.Annotations[types.AWSIAMRoleAnnotation]
+		if !exist {
+			continue
+		}
+		delete(pod.Annotations, types.AWSIAMRoleAnnotation)
+		sc.logger.Infof("Removing AWS IAM role for pod %v", pod.Name)
+		if _, err := sc.ds.UpdatePod(pod); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
 func (sc *SettingController) updateTaintToleration() error {
-	setting, err := sc.ds.GetSetting(types.SettingNameTaintToleration)
+	setting, err := sc.ds.GetSettingWithAutoFillingRO(types.SettingNameTaintToleration)
 	if err != nil {
 		return err
 	}
@@ -528,7 +621,7 @@ func getLastAppliedTolerationsList(obj runtime.Object) ([]corev1.Toleration, err
 }
 
 func (sc *SettingController) updatePriorityClass() error {
-	setting, err := sc.ds.GetSetting(types.SettingNamePriorityClass)
+	setting, err := sc.ds.GetSettingWithAutoFillingRO(types.SettingNamePriorityClass)
 	if err != nil {
 		return err
 	}
@@ -653,7 +746,7 @@ func (sc *SettingController) updateKubernetesClusterAutoscalerEnabled() error {
 }
 
 func (sc *SettingController) updateCNI() error {
-	storageNetwork, err := sc.ds.GetSetting(types.SettingNameStorageNetwork)
+	storageNetwork, err := sc.ds.GetSettingWithAutoFillingRO(types.SettingNameStorageNetwork)
 	if err != nil {
 		return err
 	}
@@ -664,7 +757,7 @@ func (sc *SettingController) updateCNI() error {
 	}
 
 	if !volumesDetached {
-		return errors.Errorf("failed to apply %v setting to Longhorn workloads when there are attached volumes", types.SettingNameStorageNetwork)
+		return &types.ErrorInvalidState{Reason: fmt.Sprintf("failed to apply %v setting to Longhorn workloads when there are attached volumes", types.SettingNameStorageNetwork)}
 	}
 
 	nadAnnot := string(types.CNIAnnotationNetworks)
@@ -693,7 +786,7 @@ func (sc *SettingController) updateCNI() error {
 }
 
 func (sc *SettingController) updateLogLevel() error {
-	setting, err := sc.ds.GetSetting(types.SettingNameLogLevel)
+	setting, err := sc.ds.GetSettingWithAutoFillingRO(types.SettingNameLogLevel)
 	if err != nil {
 		return err
 	}
@@ -764,7 +857,7 @@ func getFinalTolerations(existingTolerations, lastAppliedTolerations, newTolerat
 }
 
 func (sc *SettingController) updateNodeSelector() error {
-	setting, err := sc.ds.GetSetting(types.SettingNameSystemManagedComponentsNodeSelector)
+	setting, err := sc.ds.GetSettingWithAutoFillingRO(types.SettingNameSystemManagedComponentsNodeSelector)
 	if err != nil {
 		return err
 	}
@@ -1035,7 +1128,7 @@ func (sc *SettingController) updateInstanceManagerCPURequest() error {
 	if err != nil {
 		return errors.Wrap(err, "failed to list instance manager pods for toleration update")
 	}
-	imMap, err := sc.ds.ListInstanceManagers()
+	imMap, err := sc.ds.ListInstanceManagersRO()
 	if err != nil {
 		return err
 	}
@@ -1182,9 +1275,12 @@ const (
 	ClusterInfoVolumeReplicaAutoBalanceCountFmt          = "LonghornVolumeReplicaAutoBalance%sCount"
 	ClusterInfoVolumeReplicaSoftAntiAffinityCountFmt     = "LonghornVolumeReplicaSoftAntiAffinity%sCount"
 	ClusterInfoVolumeReplicaZoneSoftAntiAffinityCountFmt = "LonghornVolumeReplicaZoneSoftAntiAffinity%sCount"
+	ClusterInfoVolumeReplicaDiskSoftAntiAffinityCountFmt = "LonghornVolumeReplicaDiskSoftAntiAffinity%sCount"
 	ClusterInfoVolumeRestoreVolumeRecurringJobCountFmt   = "LonghornVolumeRestoreVolumeRecurringJob%sCount"
 	ClusterInfoVolumeSnapshotDataIntegrityCountFmt       = "LonghornVolumeSnapshotDataIntegrity%sCount"
 	ClusterInfoVolumeUnmapMarkSnapChainRemovedCountFmt   = "LonghornVolumeUnmapMarkSnapChainRemoved%sCount"
+
+	ClusterInfoObjectStoreCount = "LonghornObjectStoreCount"
 )
 
 // Node Scope Info: will be sent from all Longhorn cluster nodes
@@ -1241,6 +1337,10 @@ func (info *ClusterInfo) collectClusterScope() {
 	if err := info.collectSettings(); err != nil {
 		info.logger.WithError(err).Warn("Failed to collect Longhorn settings")
 	}
+
+	if err := info.collectObjectStorageInfo(); err != nil {
+		info.logger.WithError(err).Warn("Failed to collect Longhorn Object Storage info")
+	}
 }
 
 func (info *ClusterInfo) collectNamespace() error {
@@ -1252,9 +1352,9 @@ func (info *ClusterInfo) collectNamespace() error {
 }
 
 func (info *ClusterInfo) collectNodeCount() error {
-	nodesRO, err := info.ds.ListNodesRO()
+	nodes, err := info.ds.ListNodesRO()
 	if err == nil {
-		info.structFields.fields.Append(ClusterInfoNodeCount, len(nodesRO))
+		info.structFields.fields.Append(ClusterInfoNodeCount, len(nodes))
 	}
 	return err
 }
@@ -1318,6 +1418,7 @@ func (info *ClusterInfo) collectSettings() error {
 		types.SettingNameSystemManagedComponentsNodeSelector: true,
 		types.SettingNameRegistrySecret:                      true,
 		types.SettingNamePriorityClass:                       true,
+		types.SettingNameSnapshotDataIntegrityCronJob:        true,
 		types.SettingNameStorageNetwork:                      true,
 	}
 
@@ -1357,10 +1458,10 @@ func (info *ClusterInfo) collectSettings() error {
 		types.SettingNameReplicaReplenishmentWaitInterval:                         true,
 		types.SettingNameReplicaSoftAntiAffinity:                                  true,
 		types.SettingNameReplicaZoneSoftAntiAffinity:                              true,
+		types.SettingNameReplicaDiskSoftAntiAffinity:                              true,
 		types.SettingNameRestoreConcurrentLimit:                                   true,
 		types.SettingNameRestoreVolumeRecurringJobs:                               true,
 		types.SettingNameSnapshotDataIntegrity:                                    true,
-		types.SettingNameSnapshotDataIntegrityCronJob:                             true,
 		types.SettingNameSnapshotDataIntegrityImmediateCheckAfterSnapshotCreation: true,
 		types.SettingNameStorageMinimalAvailablePercentage:                        true,
 		types.SettingNameStorageOverProvisioningPercentage:                        true,
@@ -1387,7 +1488,12 @@ func (info *ClusterInfo) collectSettings() error {
 
 		// Setting that should be collected as boolean (true if configured, false if not)
 		case includeAsBoolean[settingName]:
-			settingMap[setting.Name] = setting.Value != ""
+			definition, ok := types.GetSettingDefinition(types.SettingName(setting.Name))
+			if !ok {
+				logrus.WithError(err).Warnf("Failed to get Setting %v definition", setting.Name)
+				continue
+			}
+			settingMap[setting.Name] = setting.Value != definition.Default
 
 		// Setting value
 		case include[settingName]:
@@ -1456,6 +1562,7 @@ func (info *ClusterInfo) collectVolumesInfo() error {
 	replicaAutoBalanceCountStruct := newStruct()
 	replicaSoftAntiAffinityCountStruct := newStruct()
 	replicaZoneSoftAntiAffinityCountStruct := newStruct()
+	replicaDiskSoftAntiAffinityCountStruct := newStruct()
 	restoreVolumeRecurringJobCountStruct := newStruct()
 	snapshotDataIntegrityCountStruct := newStruct()
 	unmapMarkSnapChainRemovedCountStruct := newStruct()
@@ -1496,6 +1603,9 @@ func (info *ClusterInfo) collectVolumesInfo() error {
 		replicaZoneSoftAntiAffinity := info.collectSettingInVolume(string(volume.Spec.ReplicaZoneSoftAntiAffinity), string(longhorn.ReplicaZoneSoftAntiAffinityDefault), types.SettingNameReplicaZoneSoftAntiAffinity)
 		replicaZoneSoftAntiAffinityCountStruct[util.StructName(fmt.Sprintf(ClusterInfoVolumeReplicaZoneSoftAntiAffinityCountFmt, util.ConvertToCamel(string(replicaZoneSoftAntiAffinity), "-")))]++
 
+		replicaDiskSoftAntiAffinity := info.collectSettingInVolume(string(volume.Spec.ReplicaDiskSoftAntiAffinity), string(longhorn.ReplicaDiskSoftAntiAffinityDefault), types.SettingNameReplicaDiskSoftAntiAffinity)
+		replicaDiskSoftAntiAffinityCountStruct[util.StructName(fmt.Sprintf(ClusterInfoVolumeReplicaDiskSoftAntiAffinityCountFmt, util.ConvertToCamel(string(replicaDiskSoftAntiAffinity), "-")))]++
+
 		restoreVolumeRecurringJob := info.collectSettingInVolume(string(volume.Spec.RestoreVolumeRecurringJob), string(longhorn.RestoreVolumeRecurringJobDefault), types.SettingNameRestoreVolumeRecurringJobs)
 		restoreVolumeRecurringJobCountStruct[util.StructName(fmt.Sprintf(ClusterInfoVolumeRestoreVolumeRecurringJobCountFmt, util.ConvertToCamel(string(restoreVolumeRecurringJob), "-")))]++
 
@@ -1512,6 +1622,7 @@ func (info *ClusterInfo) collectVolumesInfo() error {
 	info.structFields.fields.AppendCounted(replicaAutoBalanceCountStruct)
 	info.structFields.fields.AppendCounted(replicaSoftAntiAffinityCountStruct)
 	info.structFields.fields.AppendCounted(replicaZoneSoftAntiAffinityCountStruct)
+	info.structFields.fields.AppendCounted(replicaDiskSoftAntiAffinityCountStruct)
 	info.structFields.fields.AppendCounted(restoreVolumeRecurringJobCountStruct)
 	info.structFields.fields.AppendCounted(snapshotDataIntegrityCountStruct)
 	info.structFields.fields.AppendCounted(unmapMarkSnapChainRemovedCountStruct)
@@ -1547,7 +1658,7 @@ func (info *ClusterInfo) collectVolumesInfo() error {
 
 func (info *ClusterInfo) collectSettingInVolume(volumeSpecValue, ignoredValue string, settingName types.SettingName) string {
 	if volumeSpecValue == ignoredValue {
-		globalSetting, err := info.ds.GetSetting(settingName)
+		globalSetting, err := info.ds.GetSettingWithAutoFillingRO(settingName)
 		if err != nil {
 			info.logger.WithError(err).Warnf("Failed to get Longhorn Setting %v", settingName)
 		}
@@ -1594,7 +1705,7 @@ func (info *ClusterInfo) collectHostOSDistro() (err error) {
 }
 
 func (info *ClusterInfo) collectKubernetesNodeProvider() error {
-	node, err := info.ds.GetKubernetesNode(info.controllerID)
+	node, err := info.ds.GetKubernetesNodeRO(info.controllerID)
 	if err == nil {
 		scheme := types.GetKubernetesProviderNameFromURL(node.Spec.ProviderID)
 		info.structFields.tags.Append(ClusterInfoKubernetesNodeProvider, scheme)
@@ -1617,6 +1728,23 @@ func (info *ClusterInfo) collectNodeDiskCount() error {
 		}
 		structMap[util.StructName(fmt.Sprintf(ClusterInfoNodeDiskCountFmt, strings.ToUpper(deviceType)))]++
 	}
+	for structName, value := range structMap {
+		info.structFields.fields.Append(structName, value)
+	}
+
+	return nil
+}
+
+func (info *ClusterInfo) collectObjectStorageInfo() error {
+	stores, err := info.ds.ListObjectStoresRO()
+	if err != nil {
+		return err
+	}
+
+	structMap := make(map[util.StructName]int)
+
+	structMap[util.StructName(ClusterInfoObjectStoreCount)] = len(stores)
+
 	for structName, value := range structMap {
 		info.structFields.fields.Append(structName, value)
 	}

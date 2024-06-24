@@ -7,18 +7,18 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/controller"
+
+	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/types"
@@ -65,7 +65,7 @@ func NewKubernetesConfigMapController(
 		ds: ds,
 
 		kubeClient:    kubeClient,
-		eventRecorder: eventBroadcaster.NewRecorder(scheme, v1.EventSource{Component: "longhorn-kubernetes-configmap-controller"}),
+		eventRecorder: eventBroadcaster.NewRecorder(scheme, corev1.EventSource{Component: "longhorn-kubernetes-configmap-controller"}),
 	}
 
 	ds.ConfigMapInformer.AddEventHandlerWithResyncPeriod(
@@ -127,13 +127,14 @@ func (kc *KubernetesConfigMapController) handleErr(err error, key interface{}) {
 		return
 	}
 
+	log := kc.logger.WithField("ConfigMap", key)
 	if kc.queue.NumRequeues(key) < maxRetries {
-		kc.logger.WithError(err).Errorf("Failed to syncing ConfigMap %v", key)
+		handleReconcileErrorLogging(log, err, "Failed to syncing ConfigMap")
 		kc.queue.AddRateLimited(key)
 		return
 	}
 
-	kc.logger.WithError(err).Errorf("Dropping ConfigMap %v out of the queue", key)
+	handleReconcileErrorLogging(log, err, "Dropping ConfigMap out of the queue")
 	kc.queue.Forget(key)
 	utilruntime.HandleError(err)
 }
@@ -162,50 +163,58 @@ func (kc *KubernetesConfigMapController) reconcile(namespace, cfmName string) er
 
 	switch cfmName {
 	case types.DefaultStorageClassConfigMapName:
-		storageCFM, err := kc.ds.GetConfigMap(kc.namespace, types.DefaultStorageClassConfigMapName)
-		if err != nil {
-			return err
-		}
-
-		storageclassYAML, ok := storageCFM.Data["storageclass.yaml"]
-		if !ok {
-			return fmt.Errorf("failed to find storageclass.yaml inside the default StorageClass ConfigMap")
-		}
-
-		existingSC, err := kc.ds.GetStorageClassRO(types.DefaultStorageClassName)
-		if err != nil && !datastore.ErrorIsNotFound(err) {
-			return err
-		}
-
-		if !needToUpdateStorageClass(storageclassYAML, existingSC) {
-			return nil
-		}
-
-		storageclass, err := buildStorageClassManifestFromYAMLString(storageclassYAML)
-		if err != nil {
-			return err
-		}
-
-		err = kc.ds.DeleteStorageClass(types.DefaultStorageClassName)
-		if err != nil && !datastore.ErrorIsNotFound(err) {
-			return err
-		}
-
-		storageclass, err = kc.ds.CreateStorageClass(storageclass)
-		if err != nil {
-			if apierrors.IsAlreadyExists(err) {
-				return nil
-			}
-			return err
-		}
-
-		kc.logger.Infof("Updated the default Longhorn StorageClass: %v", storageclass)
+		return kc.reconcileStorageClassFromConfigMap(types.DefaultStorageClassConfigMapName)
+	case types.DefaultObjectStoreStorageClassConfigMapName:
+		return kc.reconcileStorageClassFromConfigMap(types.DefaultObjectStoreStorageClassConfigMapName)
 	case types.DefaultDefaultSettingConfigMapName:
 		if err := kc.ds.UpdateCustomizedSettings(nil); err != nil {
 			return errors.Wrap(err, "failed to update built-in settings with customized values")
 		}
 	}
 
+	return nil
+}
+
+// reconcileStorageClassFromConfigMap takes the name of a config map and creates
+// or updates the storage class described within that config map.
+func (kc *KubernetesConfigMapController) reconcileStorageClassFromConfigMap(name string) (err error) {
+	cfm, err := kc.ds.GetConfigMap(kc.namespace, name)
+	if err != nil {
+		return err
+	}
+
+	scYAML, ok := cfm.Data[types.StorageClassConfigMapKey]
+	if !ok {
+		return fmt.Errorf("failed to find key %v inside the config map %v", types.StorageClassConfigMapKey, name)
+	}
+
+	manifest, err := buildStorageClassManifestFromYAMLString(scYAML)
+	if err != nil {
+		return err
+	}
+
+	oldSC, err := kc.ds.GetStorageClassRO(manifest.Name)
+	if err != nil && !datastore.ErrorIsNotFound(err) {
+		return err
+	}
+
+	// Storage classes are immutable. But we can delete it and recreate it.
+	if needToUpdateStorageClass(scYAML, oldSC) {
+		err = kc.ds.DeleteStorageClass(manifest.Name)
+		if err != nil && !datastore.ErrorIsNotFound(err) {
+			return err
+		}
+	}
+
+	sc, err := kc.ds.CreateStorageClass(manifest)
+	if err != nil {
+		if datastore.ErrorIsAlreadyExists(err) {
+			return nil
+		}
+		return err
+	}
+
+	kc.logger.Infof("updated storage class from configmap %v: %v", name, sc)
 	return nil
 }
 
@@ -236,7 +245,7 @@ func needToUpdateStorageClass(storageclassYAML string, existingSC *storagev1.Sto
 	}
 
 	lastAppliedConfiguration, ok := existingSC.Annotations[types.GetLonghornLabelKey(lastAppliedStorageConfigLabelKeySuffix)]
-	if !ok { //First time creation using the default StorageClass ConfigMap
+	if !ok { // First time creation using the default StorageClass ConfigMap
 		return true
 	}
 

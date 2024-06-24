@@ -7,12 +7,12 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/controller"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	imapi "github.com/longhorn/longhorn-instance-manager/pkg/api"
@@ -20,11 +20,10 @@ import (
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/engineapi"
 	"github.com/longhorn/longhorn-manager/types"
+	"github.com/longhorn/longhorn-manager/util"
 
 	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	lhfake "github.com/longhorn/longhorn-manager/k8s/pkg/client/clientset/versioned/fake"
-	lhinformerfactory "github.com/longhorn/longhorn-manager/k8s/pkg/client/informers/externalversions"
-	apiextensionsfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 
 	. "gopkg.in/check.v1"
 )
@@ -94,7 +93,7 @@ func newEngine(name, currentImage, imName, nodeName, ip string, port int, starte
 				VolumeSize:  TestVolumeSize,
 				DesireState: desireState,
 				NodeID:      nodeName,
-				EngineImage: TestEngineImage,
+				Image:       TestEngineImage,
 			},
 		},
 		Status: longhorn.EngineStatus{
@@ -485,18 +484,16 @@ func (s *TestSuite) TestReconcileInstanceState(c *C) {
 		fmt.Printf("testing instance handler: %v\n", name)
 
 		kubeClient := fake.NewSimpleClientset()
-		kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, controller.NoResyncPeriodFunc())
-
 		lhClient := lhfake.NewSimpleClientset()
-		lhInformerFactory := lhinformerfactory.NewSharedInformerFactory(lhClient, controller.NoResyncPeriodFunc())
-
-		eiIndexer := lhInformerFactory.Longhorn().V1beta2().EngineImages().Informer().GetIndexer()
-		sIndexer := lhInformerFactory.Longhorn().V1beta2().Settings().Informer().GetIndexer()
-		pIndexer := kubeInformerFactory.Core().V1().Pods().Informer().GetIndexer()
-
 		extensionsClient := apiextensionsfake.NewSimpleClientset()
 
-		h := newTestInstanceHandler(lhInformerFactory, kubeInformerFactory, lhClient, kubeClient, extensionsClient)
+		informerFactories := util.NewInformerFactories(TestNamespace, kubeClient, lhClient, controller.NoResyncPeriodFunc())
+
+		eiIndexer := informerFactories.LhInformerFactory.Longhorn().V1beta2().EngineImages().Informer().GetIndexer()
+		sIndexer := informerFactories.LhInformerFactory.Longhorn().V1beta2().Settings().Informer().GetIndexer()
+		pIndexer := informerFactories.KubeInformerFactory.Core().V1().Pods().Informer().GetIndexer()
+
+		h := newTestInstanceHandler(lhClient, kubeClient, extensionsClient, informerFactories)
 
 		ei, err := lhClient.LonghornV1beta2().EngineImages(TestNamespace).Create(context.TODO(), newEngineImage(TestEngineImage, longhorn.EngineImageStateDeployed), metav1.CreateOptions{})
 		c.Assert(err, IsNil)
@@ -512,7 +509,7 @@ func (s *TestSuite) TestReconcileInstanceState(c *C) {
 		if tc.instanceManager != nil {
 			im, err := lhClient.LonghornV1beta2().InstanceManagers(TestNamespace).Create(context.TODO(), tc.instanceManager, metav1.CreateOptions{})
 			c.Assert(err, IsNil)
-			imIndexer := lhInformerFactory.Longhorn().V1beta2().InstanceManagers().Informer().GetIndexer()
+			imIndexer := informerFactories.LhInformerFactory.Longhorn().V1beta2().InstanceManagers().Informer().GetIndexer()
 			err = imIndexer.Add(im)
 			c.Assert(err, IsNil)
 
@@ -525,7 +522,7 @@ func (s *TestSuite) TestReconcileInstanceState(c *C) {
 
 		node, err := lhClient.LonghornV1beta2().Nodes(TestNamespace).Create(context.TODO(), newNode(TestNode1, TestNamespace, true, longhorn.ConditionStatusTrue, ""), metav1.CreateOptions{})
 		c.Assert(err, IsNil)
-		nodeIndexer := lhInformerFactory.Longhorn().V1beta2().Nodes().Informer().GetIndexer()
+		nodeIndexer := informerFactories.LhInformerFactory.Longhorn().V1beta2().Nodes().Informer().GetIndexer()
 		err = nodeIndexer.Add(node)
 		c.Assert(err, IsNil)
 
@@ -552,9 +549,8 @@ func (s *TestSuite) TestReconcileInstanceState(c *C) {
 	}
 }
 
-func newTestInstanceHandler(lhInformerFactory lhinformerfactory.SharedInformerFactory, kubeInformerFactory informers.SharedInformerFactory,
-	lhClient *lhfake.Clientset, kubeClient *fake.Clientset, extensionsClient *apiextensionsfake.Clientset) *InstanceHandler {
-	ds := datastore.NewDataStore(lhInformerFactory, lhClient, kubeInformerFactory, kubeClient, extensionsClient, TestNamespace)
+func newTestInstanceHandler(lhClient *lhfake.Clientset, kubeClient *fake.Clientset, extensionsClient *apiextensionsfake.Clientset, informerFactories *util.InformerFactories) *InstanceHandler {
+	ds := datastore.NewDataStore(TestNamespace, lhClient, kubeClient, extensionsClient, informerFactories)
 	fakeRecorder := record.NewFakeRecorder(100)
 	return NewInstanceHandler(ds, &MockInstanceManagerHandler{}, fakeRecorder)
 }

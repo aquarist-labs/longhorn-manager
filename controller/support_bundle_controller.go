@@ -119,7 +119,7 @@ func NewSupportBundleController(
 		UpdateFunc: func(old, cur interface{}) { c.enqueue(cur) },
 		DeleteFunc: c.enqueue,
 	}, 0)
-	c.cacheSyncs = append(c.cacheSyncs, ds.OrphanInformer.HasSynced)
+	c.cacheSyncs = append(c.cacheSyncs, ds.SupportBundleInformer.HasSynced)
 
 	return c
 }
@@ -187,14 +187,13 @@ func (c *SupportBundleController) handleErr(err error, key interface{}) {
 	log := c.logger.WithField("supportBundle", key)
 
 	if c.queue.NumRequeues(key) < maxRetries {
-		log.WithError(err).Error("Error syncing Longhorn SupportBundle")
-
+		handleReconcileErrorLogging(log, err, "Failed syncing Longhorn SupportBundle")
 		c.queue.AddRateLimited(key)
 		return
 	}
 
 	utilruntime.HandleError(err)
-	log.WithError(err).Error("Dropping Longhorn SupportBundle out of the queue")
+	handleReconcileErrorLogging(log, err, "Dropping Longhorn SupportBundle out of the queue")
 	c.queue.Forget(key)
 }
 
@@ -624,13 +623,13 @@ func (c *SupportBundleController) createSupportBundleManagerDeployment(supportBu
 		return nil, errors.Wrap(err, "failed to get system pods image pull policy before creating support bundle manager deployment")
 	}
 
-	priorityClassSetting, err := c.ds.GetSetting(types.SettingNamePriorityClass)
+	priorityClassSetting, err := c.ds.GetSettingWithAutoFillingRO(types.SettingNamePriorityClass)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get priority class setting before creating support bundle manager deployment")
 	}
 	priorityClass := priorityClassSetting.Value
 
-	registrySecretSetting, err := c.ds.GetSetting(types.SettingNameRegistrySecret)
+	registrySecretSetting, err := c.ds.GetSettingWithAutoFillingRO(types.SettingNameRegistrySecret)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get registry secret setting before creating support bundle manager deployment")
 	}
@@ -646,7 +645,7 @@ func (c *SupportBundleController) createSupportBundleManagerDeployment(supportBu
 func (c *SupportBundleController) newSupportBundleManager(supportBundle *longhorn.SupportBundle, nodeSelector map[string]string,
 	imagePullPolicy corev1.PullPolicy, priorityClass, registrySecret string) (*appsv1.Deployment, error) {
 
-	tolerationSetting, err := c.ds.GetSetting(types.SettingNameTaintToleration)
+	tolerationSetting, err := c.ds.GetSettingWithAutoFillingRO(types.SettingNameTaintToleration)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to get %v setting", types.SettingNameTaintToleration)
 	}
@@ -698,6 +697,14 @@ func (c *SupportBundleController) newSupportBundleManager(supportBundle *longhor
 								{
 									Name:  "SUPPORT_BUNDLE_NAME",
 									Value: supportBundle.Name,
+								},
+								{
+									Name:  "SUPPORT_BUNDLE_ISSUE_URL",
+									Value: supportBundle.Spec.IssueURL,
+								},
+								{
+									Name:  "SUPPORT_BUNDLE_DESCRIPTION",
+									Value: supportBundle.Spec.Description,
 								},
 								{
 									Name:  "SUPPORT_BUNDLE_DEBUG",

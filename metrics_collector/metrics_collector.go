@@ -6,16 +6,18 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/clientcmd"
+
+	corev1 "k8s.io/api/core/v1"
 	metricsclientset "k8s.io/metrics/pkg/client/clientset/versioned"
 
 	"github.com/longhorn/longhorn-manager/datastore"
-	_ "github.com/longhorn/longhorn-manager/metrics_collector/client_go_adaper" // load the client-go metrics
 	"github.com/longhorn/longhorn-manager/metrics_collector/registry"
-	_ "github.com/longhorn/longhorn-manager/metrics_collector/workqueue" // load the workqueue metrics
 	"github.com/longhorn/longhorn-manager/types"
 	"github.com/longhorn/longhorn-manager/util"
+
+	_ "github.com/longhorn/longhorn-manager/metrics_collector/client_go_adaper" // load the client-go metrics
+	_ "github.com/longhorn/longhorn-manager/metrics_collector/workqueue"        // load the workqueue metrics
 )
 
 func InitMetricsCollectorSystem(logger logrus.FieldLogger, currentNodeID string, ds *datastore.DataStore, kubeconfigPath string, proxyConnCounter util.Counter) {
@@ -24,6 +26,7 @@ func InitMetricsCollectorSystem(logger logrus.FieldLogger, currentNodeID string,
 	vc := NewVolumeCollector(logger, currentNodeID, ds)
 	dc := NewDiskCollector(logger, currentNodeID, ds)
 	bc := NewBackupCollector(logger, currentNodeID, ds)
+	oc := NewObjectStoreCollector(logger, currentNodeID, ds)
 
 	if err := registry.Register(vc); err != nil {
 		logger.WithField("collector", subsystemVolume).WithError(err).Warn("Failed to register collector")
@@ -35,6 +38,10 @@ func InitMetricsCollectorSystem(logger logrus.FieldLogger, currentNodeID string,
 
 	if err := registry.Register(bc); err != nil {
 		logger.WithField("collector", subsystemBackup).WithError(err).Warn("Failed to register collector")
+	}
+
+	if err := registry.Register(oc); err != nil {
+		logger.WithField("collector", subsystemObjectStorage).WithError(err).Warn("Failed to register collector")
 	}
 
 	namespace := os.Getenv(types.EnvPodNamespace)

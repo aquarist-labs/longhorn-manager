@@ -6,22 +6,22 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/controller"
 
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/engineapi"
 	"github.com/longhorn/longhorn-manager/types"
+	"github.com/longhorn/longhorn-manager/util"
 
 	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	lhfake "github.com/longhorn/longhorn-manager/k8s/pkg/client/clientset/versioned/fake"
-	lhinformerfactory "github.com/longhorn/longhorn-manager/k8s/pkg/client/informers/externalversions"
-	apiextensionsfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 
 	. "gopkg.in/check.v1"
 )
@@ -31,7 +31,7 @@ type InstanceManagerTestCase struct {
 	nodeDown     bool
 	nodeID       string
 
-	currentPodStatus *v1.PodStatus
+	currentPodStatus *corev1.PodStatus
 	currentOwnerID   string
 	currentState     longhorn.InstanceManagerState
 	currentEngines   map[string]longhorn.InstanceProcess
@@ -56,11 +56,9 @@ func fakeInstanceManagerVersionUpdater(im *longhorn.InstanceManager) error {
 	return nil
 }
 
-func newTestInstanceManagerController(lhInformerFactory lhinformerfactory.SharedInformerFactory,
-	kubeInformerFactory informers.SharedInformerFactory, lhClient *lhfake.Clientset, kubeClient *fake.Clientset,
-	extensionsClient *apiextensionsfake.Clientset, controllerID string) *InstanceManagerController {
-
-	ds := datastore.NewDataStore(lhInformerFactory, lhClient, kubeInformerFactory, kubeClient, extensionsClient, TestNamespace)
+func newTestInstanceManagerController(lhClient *lhfake.Clientset, kubeClient *fake.Clientset, extensionsClient *apiextensionsfake.Clientset,
+	informerFactories *util.InformerFactories, controllerID string) *InstanceManagerController {
+	ds := datastore.NewDataStore(TestNamespace, lhClient, kubeClient, extensionsClient, informerFactories)
 
 	logger := logrus.StandardLogger()
 
@@ -81,7 +79,7 @@ func (s *TestSuite) TestSyncInstanceManager(c *C) {
 	testCases := map[string]InstanceManagerTestCase{
 		"instance manager change ownership": {
 			TestNode1, false, TestNode1,
-			&v1.PodStatus{PodIP: TestIP1, Phase: v1.PodRunning},
+			&corev1.PodStatus{PodIP: TestIP1, Phase: corev1.PodRunning},
 			TestNode2, longhorn.InstanceManagerStateUnknown, nil, nil, 1,
 			longhorn.InstanceManagerStatus{
 				OwnerID:       TestNode1,
@@ -93,7 +91,7 @@ func (s *TestSuite) TestSyncInstanceManager(c *C) {
 		},
 		"instance manager error then restart immediately": {
 			TestNode1, false, TestNode1,
-			&v1.PodStatus{PodIP: "", Phase: v1.PodFailed},
+			&corev1.PodStatus{PodIP: "", Phase: corev1.PodFailed},
 			TestNode1, longhorn.InstanceManagerStateRunning,
 			map[string]longhorn.InstanceProcess{ // Process information will be erased in the next reconcile loop.
 				TestEngineName: {
@@ -130,7 +128,7 @@ func (s *TestSuite) TestSyncInstanceManager(c *C) {
 		},
 		"instance manager node down": {
 			TestNode2, true, TestNode1,
-			&v1.PodStatus{PodIP: TestIP1, Phase: v1.PodRunning},
+			&corev1.PodStatus{PodIP: TestIP1, Phase: corev1.PodRunning},
 			TestNode2, longhorn.InstanceManagerStateRunning, nil, nil, 1,
 			longhorn.InstanceManagerStatus{
 				OwnerID:       TestNode2,
@@ -142,7 +140,7 @@ func (s *TestSuite) TestSyncInstanceManager(c *C) {
 		},
 		"instance manager restarting after error": {
 			TestNode1, false, TestNode1,
-			&v1.PodStatus{PodIP: TestIP1, Phase: v1.PodPending},
+			&corev1.PodStatus{PodIP: TestIP1, Phase: corev1.PodPending},
 			TestNode1, longhorn.InstanceManagerStateError, nil, nil, 1,
 			longhorn.InstanceManagerStatus{
 				OwnerID:       TestNode1,
@@ -153,7 +151,7 @@ func (s *TestSuite) TestSyncInstanceManager(c *C) {
 		},
 		"instance manager running": {
 			TestNode1, false, TestNode1,
-			&v1.PodStatus{PodIP: TestIP1, Phase: v1.PodRunning},
+			&corev1.PodStatus{PodIP: TestIP1, Phase: corev1.PodRunning},
 			TestNode1, longhorn.InstanceManagerStateStarting, nil, nil, 1,
 			longhorn.InstanceManagerStatus{
 				OwnerID:       TestNode1,
@@ -187,7 +185,7 @@ func (s *TestSuite) TestSyncInstanceManager(c *C) {
 		},
 		"instance manager sync IP": {
 			TestNode1, false, TestNode1,
-			&v1.PodStatus{PodIP: TestIP2, Phase: v1.PodRunning},
+			&corev1.PodStatus{PodIP: TestIP2, Phase: corev1.PodRunning},
 			TestNode1, longhorn.InstanceManagerStateRunning, nil, nil, 1,
 			longhorn.InstanceManagerStatus{
 				OwnerID:       TestNode1,
@@ -203,20 +201,19 @@ func (s *TestSuite) TestSyncInstanceManager(c *C) {
 		fmt.Printf("testing %v\n", name)
 
 		kubeClient := fake.NewSimpleClientset()
-		kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, controller.NoResyncPeriodFunc())
-		pIndexer := kubeInformerFactory.Core().V1().Pods().Informer().GetIndexer()
-		kubeNodeIndexer := kubeInformerFactory.Core().V1().Nodes().Informer().GetIndexer()
-
 		lhClient := lhfake.NewSimpleClientset()
-		lhInformerFactory := lhinformerfactory.NewSharedInformerFactory(lhClient, controller.NoResyncPeriodFunc())
-		imIndexer := lhInformerFactory.Longhorn().V1beta2().InstanceManagers().Informer().GetIndexer()
-		sIndexer := lhInformerFactory.Longhorn().V1beta2().Settings().Informer().GetIndexer()
-		lhNodeIndexer := lhInformerFactory.Longhorn().V1beta2().Nodes().Informer().GetIndexer()
-
 		extensionsClient := apiextensionsfake.NewSimpleClientset()
 
-		imc := newTestInstanceManagerController(lhInformerFactory, kubeInformerFactory, lhClient, kubeClient,
-			extensionsClient, tc.controllerID)
+		informerFactories := util.NewInformerFactories(TestNamespace, kubeClient, lhClient, controller.NoResyncPeriodFunc())
+
+		pIndexer := informerFactories.KubeInformerFactory.Core().V1().Pods().Informer().GetIndexer()
+		kubeNodeIndexer := informerFactories.KubeInformerFactory.Core().V1().Nodes().Informer().GetIndexer()
+
+		imIndexer := informerFactories.LhInformerFactory.Longhorn().V1beta2().InstanceManagers().Informer().GetIndexer()
+		sIndexer := informerFactories.LhInformerFactory.Longhorn().V1beta2().Settings().Informer().GetIndexer()
+		lhNodeIndexer := informerFactories.LhInformerFactory.Longhorn().V1beta2().Nodes().Informer().GetIndexer()
+
+		imc := newTestInstanceManagerController(lhClient, kubeClient, extensionsClient, informerFactories, tc.controllerID)
 
 		// Controller logic depends on the existence of DefaultInstanceManagerImage Setting and Toleration Setting.
 		tolerationSetting := newTolerationSetting()
@@ -232,7 +229,7 @@ func (s *TestSuite) TestSyncInstanceManager(c *C) {
 
 		// Create Nodes for test. Conditionally add the first Node.
 		if !tc.nodeDown {
-			kubeNode1 := newKubernetesNode(TestNode1, v1.ConditionTrue, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionTrue)
+			kubeNode1 := newKubernetesNode(TestNode1, corev1.ConditionTrue, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionTrue)
 			err = kubeNodeIndexer.Add(kubeNode1)
 			c.Assert(err, IsNil)
 			_, err = kubeClient.CoreV1().Nodes().Create(context.TODO(), kubeNode1, metav1.CreateOptions{})
@@ -245,7 +242,7 @@ func (s *TestSuite) TestSyncInstanceManager(c *C) {
 			c.Assert(err, IsNil)
 		}
 
-		kubeNode2 := newKubernetesNode(TestNode2, v1.ConditionTrue, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionFalse, v1.ConditionTrue)
+		kubeNode2 := newKubernetesNode(TestNode2, corev1.ConditionTrue, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionFalse, corev1.ConditionTrue)
 		err = kubeNodeIndexer.Add(kubeNode2)
 		c.Assert(err, IsNil)
 		_, err = kubeClient.CoreV1().Nodes().Create(context.TODO(), kubeNode2, metav1.CreateOptions{})

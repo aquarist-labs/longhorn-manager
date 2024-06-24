@@ -9,21 +9,23 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	clientset "k8s.io/client-go/kubernetes"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/controller"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
+
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/engineapi"
-	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	"github.com/longhorn/longhorn-manager/util"
+
+	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 )
 
 type SnapshotController struct {
@@ -67,7 +69,7 @@ func NewSnapshotController(
 		namespace:              namespace,
 		controllerID:           controllerID,
 		kubeClient:             kubeClient,
-		eventRecorder:          eventBroadcaster.NewRecorder(scheme, v1.EventSource{Component: "longhorn-snapshot-controller"}),
+		eventRecorder:          eventBroadcaster.NewRecorder(scheme, corev1.EventSource{Component: "longhorn-snapshot-controller"}),
 		ds:                     ds,
 		engineClientCollection: engineClientCollection,
 		proxyConnCounter:       proxyConnCounter,
@@ -245,17 +247,18 @@ func (sc *SnapshotController) processNextWorkItem() bool {
 	}
 	defer sc.queue.Done(key)
 	err := sc.syncHandler(key.(string))
-	sc.handlerErr(err, key)
+	sc.handleErr(err, key)
 	return true
 }
 
-func (sc *SnapshotController) handlerErr(err error, key interface{}) {
+func (sc *SnapshotController) handleErr(err error, key interface{}) {
 	if err == nil {
 		sc.queue.Forget(key)
 		return
 	}
 
-	sc.logger.WithError(err).Errorf("Failed to sync Longhorn snapshot %v", key)
+	log := sc.logger.WithField("Snapshot", key)
+	handleReconcileErrorLogging(log, err, "Failed to sync Longhorn snapshot")
 	sc.queue.AddRateLimited(key)
 	return
 }
@@ -318,7 +321,7 @@ func (sc *SnapshotController) reconcile(snapshotName string) (err error) {
 			return sc.ds.RemoveFinalizerForSnapshot(snapshot)
 		}
 
-		engine, err := sc.getTheOnlyEngineCRforSnapshot(snapshot)
+		engine, err := sc.getTheOnlyEngineCRforSnapshotRO(snapshot)
 		if err != nil {
 			return err
 		}
@@ -342,7 +345,7 @@ func (sc *SnapshotController) reconcile(snapshotName string) (err error) {
 			return sc.handleAttachmentTicketDeletion(snapshot)
 		}
 
-		if err := sc.handleAttachmentTicketCreation(snapshot); err != nil {
+		if err := sc.handleAttachmentTicketCreation(snapshot, true); err != nil {
 			return err
 		}
 
@@ -378,14 +381,14 @@ func (sc *SnapshotController) reconcile(snapshotName string) (err error) {
 		}
 	}()
 
-	engine, err := sc.getTheOnlyEngineCRforSnapshot(snapshot)
+	engine, err := sc.getTheOnlyEngineCRforSnapshotRO(snapshot)
 	if err != nil {
 		return err
 	}
 
 	// newly created snapshotCR by user
 	if requestCreateNewSnapshot && !alreadyCreatedBefore {
-		if err := sc.handleAttachmentTicketCreation(snapshot); err != nil {
+		if err := sc.handleAttachmentTicketCreation(snapshot, false); err != nil {
 			return err
 		}
 		if engine.Status.CurrentState != longhorn.InstanceStateRunning {
@@ -449,12 +452,13 @@ func (sc *SnapshotController) handleAttachmentTicketDeletion(snap *longhorn.Snap
 }
 
 // handleAttachmentTicketCreation check and create attachment so that the source volume is attached if needed
-func (sc *SnapshotController) handleAttachmentTicketCreation(snap *longhorn.Snapshot) (err error) {
+func (sc *SnapshotController) handleAttachmentTicketCreation(snap *longhorn.Snapshot,
+	checkIfSnapshotExists bool) (err error) {
 	defer func() {
 		err = errors.Wrap(err, "handleAttachmentTicketCreation: failed to create/update attachment")
 	}()
 
-	vol, err := sc.ds.GetVolume(snap.Spec.Volume)
+	vol, err := sc.ds.GetVolumeRO(snap.Spec.Volume)
 	if err != nil {
 		return err
 	}
@@ -466,11 +470,18 @@ func (sc *SnapshotController) handleAttachmentTicketCreation(snap *longhorn.Snap
 
 	existingVA := va.DeepCopy()
 	defer func() {
-		if err != nil {
-			return
-		}
 		if reflect.DeepEqual(existingVA.Spec, va.Spec) {
 			return
+		}
+
+		if checkIfSnapshotExists {
+			// It is possible we are reconciling a cached version of a deleted snapshot (only if deletionTimestamp is
+			// set). Confirm that the snapshot still exists on the API server before creating an attachment ticket to
+			// prevent an orphan attachment (see longhorn/longhorn#6652). Avoid checking until here to limit
+			// requests to the API server.
+			if _, err = sc.ds.GetLonghornSnapshotUncached(snap.Name); err != nil {
+				return // Either the snapshot no longer exists or we failed to check.
+			}
 		}
 
 		if _, err = sc.ds.UpdateLHVolumeAttachment(va); err != nil {
@@ -486,19 +497,19 @@ func (sc *SnapshotController) handleAttachmentTicketCreation(snap *longhorn.Snap
 
 func (sc *SnapshotController) generatingEventsForSnapshot(existingSnapshot, snapshot *longhorn.Snapshot) {
 	if !existingSnapshot.Status.MarkRemoved && snapshot.Status.MarkRemoved {
-		sc.eventRecorder.Event(snapshot, v1.EventTypeWarning, "SnapshotDelete", "snapshot is marked as removed")
+		sc.eventRecorder.Event(snapshot, corev1.EventTypeWarning, "SnapshotDelete", "snapshot is marked as removed")
 	}
 	if snapshot.Spec.CreateSnapshot && existingSnapshot.Status.CreationTime == "" && snapshot.Status.CreationTime != "" {
-		sc.eventRecorder.Eventf(snapshot, v1.EventTypeNormal, "SnapshotCreate", "successfully provisioned the snapshot")
+		sc.eventRecorder.Eventf(snapshot, corev1.EventTypeNormal, "SnapshotCreate", "successfully provisioned the snapshot")
 	}
 	if snapshot.Status.Error != "" && existingSnapshot.Status.Error != snapshot.Status.Error {
-		sc.eventRecorder.Eventf(snapshot, v1.EventTypeWarning, "SnapshotError", "%v", snapshot.Status.Error)
+		sc.eventRecorder.Eventf(snapshot, corev1.EventTypeWarning, "SnapshotError", "%v", snapshot.Status.Error)
 	}
 	if existingSnapshot.Status.ReadyToUse != snapshot.Status.ReadyToUse {
 		if snapshot.Status.ReadyToUse {
-			sc.eventRecorder.Eventf(snapshot, v1.EventTypeNormal, "SnapshotUpdate", "snapshot becomes ready to use")
+			sc.eventRecorder.Eventf(snapshot, corev1.EventTypeNormal, "SnapshotUpdate", "snapshot becomes ready to use")
 		} else {
-			sc.eventRecorder.Eventf(snapshot, v1.EventTypeWarning, "SnapshotUpdate", "snapshot becomes not ready to use")
+			sc.eventRecorder.Eventf(snapshot, corev1.EventTypeWarning, "SnapshotUpdate", "snapshot becomes not ready to use")
 		}
 	}
 }
@@ -536,8 +547,8 @@ func syncSnapshotWithSnapshotInfo(snap *longhorn.Snapshot, snapInfo *longhorn.Sn
 	return nil
 }
 
-func (sc *SnapshotController) getTheOnlyEngineCRforSnapshot(snapshot *longhorn.Snapshot) (*longhorn.Engine, error) {
-	engines, err := sc.ds.ListVolumeEngines(snapshot.Spec.Volume)
+func (sc *SnapshotController) getTheOnlyEngineCRforSnapshotRO(snapshot *longhorn.Snapshot) (*longhorn.Engine, error) {
+	engines, err := sc.ds.ListVolumeEnginesRO(snapshot.Spec.Volume)
 	if err != nil {
 		return nil, errors.Wrap(err, "getTheOnlyEngineCRforSnapshot")
 	}

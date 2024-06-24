@@ -13,17 +13,18 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	clientset "k8s.io/client-go/kubernetes"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/controller"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	imapi "github.com/longhorn/longhorn-instance-manager/pkg/api"
 
@@ -76,7 +77,7 @@ func NewReplicaController(
 		controllerID: controllerID,
 
 		kubeClient:    kubeClient,
-		eventRecorder: eventBroadcaster.NewRecorder(scheme, v1.EventSource{Component: "longhorn-replica-controller"}),
+		eventRecorder: eventBroadcaster.NewRecorder(scheme, corev1.EventSource{Component: "longhorn-replica-controller"}),
 
 		ds: ds,
 
@@ -172,14 +173,15 @@ func (rc *ReplicaController) handleErr(err error, key interface{}) {
 		return
 	}
 
+	log := rc.logger.WithField("Replica", key)
 	if rc.queue.NumRequeues(key) < maxRetries {
-		rc.logger.WithError(err).Errorf("Error syncing Longhorn replica %v", key)
+		handleReconcileErrorLogging(log, err, "Failed to sync Longhorn replica")
 		rc.queue.AddRateLimited(key)
 		return
 	}
 
 	utilruntime.HandleError(err)
-	rc.logger.WithError(err).Errorf("Dropping Longhorn replica %v out of the queue", key)
+	handleReconcileErrorLogging(log, err, "Dropping Longhorn replica out of the queue")
 	rc.queue.Forget(key)
 }
 
@@ -191,69 +193,6 @@ func getLoggerForReplica(logger logrus.FieldLogger, r *longhorn.Replica) *logrus
 			"ownerID": r.Status.OwnerID,
 		},
 	)
-}
-
-// From replica to check Node.Spec.EvictionRequested of the node
-// this replica first, then check Node.Spec.Disks.EvictionRequested
-func (rc *ReplicaController) isEvictionRequested(replica *longhorn.Replica) bool {
-	// Return false if this replica has not been assigned to a node.
-	if replica.Spec.NodeID == "" {
-		return false
-	}
-
-	log := getLoggerForReplica(rc.logger, replica)
-
-	if isDownOrDeleted, err := rc.ds.IsNodeDownOrDeleted(replica.Spec.NodeID); err != nil {
-		log.WithError(err).Warn("Failed to check if node is down or deleted")
-		return false
-	} else if isDownOrDeleted {
-		return false
-	}
-
-	node, err := rc.ds.GetNode(replica.Spec.NodeID)
-	if err != nil {
-		log.WithError(err).Warn("Failed to get node information")
-		return false
-	}
-
-	// Check if node has been request eviction.
-	if node.Spec.EvictionRequested {
-		return true
-	}
-
-	// Check if disk has been request eviction.
-	for diskName, diskStatus := range node.Status.DiskStatus {
-		if diskStatus.DiskUUID != replica.Spec.DiskID {
-			continue
-		}
-		diskSpec, ok := node.Spec.Disks[diskName]
-		if !ok {
-			log.Warnf("Cannot continue handling replica eviction since there is no spec for disk name %v on node %v", diskName, node.Name)
-			return false
-		}
-		return diskSpec.EvictionRequested
-	}
-
-	return false
-}
-
-func (rc *ReplicaController) UpdateReplicaEvictionStatus(replica *longhorn.Replica) {
-	log := getLoggerForReplica(rc.logger, replica)
-
-	// Check if eviction has been requested on this replica
-	if rc.isEvictionRequested(replica) &&
-		!replica.Status.EvictionRequested {
-		replica.Status.EvictionRequested = true
-		log.Info("Replica has requested eviction")
-	}
-
-	// Check if eviction has been cancelled on this replica
-	if !rc.isEvictionRequested(replica) &&
-		replica.Status.EvictionRequested {
-		replica.Status.EvictionRequested = false
-		log.Info("Replica has cancelled eviction")
-	}
-
 }
 
 func (rc *ReplicaController) syncReplica(key string) (err error) {
@@ -301,11 +240,18 @@ func (rc *ReplicaController) syncReplica(key string) (err error) {
 			return errors.Wrapf(err, "failed to cleanup the related replica instance before deleting replica %v", replica.Name)
 		}
 
+		rs, err := rc.ds.ListReplicasByNodeRO(replica.Spec.NodeID)
+		if err != nil {
+			return errors.Wrapf(err, "failed to list replicas by node before deleting replica %v", replica.Name)
+		}
+
 		if replica.Spec.NodeID != "" && replica.Spec.NodeID != rc.controllerID {
 			log.Warn("Failed to cleanup replica's data because the replica's data is not on this node")
 		} else if replica.Spec.NodeID != "" {
 			if replica.Spec.BackendStoreDriver == longhorn.BackendStoreDriverTypeV1 {
-				if replica.Spec.Active && dataPath != "" {
+				// Clean up the data directory if this is the active replica or if this inactive replica is the only one
+				// using it.
+				if (replica.Spec.Active || !hasMatchingReplica(replica, rs)) && dataPath != "" {
 					// prevent accidentally deletion
 					if !strings.Contains(filepath.Base(filepath.Clean(dataPath)), "-") {
 						return fmt.Errorf("%v doesn't look like a replica data path", dataPath)
@@ -337,8 +283,8 @@ func (rc *ReplicaController) syncReplica(key string) (err error) {
 		}
 	}()
 
-	// Update `Replica.Status.EvictionRequested` field
-	rc.UpdateReplicaEvictionStatus(replica)
+	// Deprecated and no longer used by Longhorn, but maybe someone's external tooling uses it? Remove in v1.7.0.
+	replica.Status.EvictionRequested = replica.Spec.EvictionRequested
 
 	return rc.instanceHandler.ReconcileInstanceState(replica, &replica.Spec.InstanceSpec, &replica.Status.InstanceStatus)
 }
@@ -368,12 +314,19 @@ func (rc *ReplicaController) CreateInstance(obj interface{}) (*longhorn.Instance
 	backingImagePath := ""
 	if r.Spec.BackingImage != "" {
 		if backingImagePath, err = rc.GetBackingImagePathForReplicaStarting(r); err != nil {
+			r.Status.Conditions = types.SetCondition(r.Status.Conditions, longhorn.ReplicaConditionTypeWaitForBackingImage,
+				longhorn.ConditionStatusTrue, longhorn.ReplicaConditionReasonWaitForBackingImageFailed, err.Error())
 			return nil, err
 		}
 		if backingImagePath == "" {
+			r.Status.Conditions = types.SetCondition(r.Status.Conditions, longhorn.ReplicaConditionTypeWaitForBackingImage,
+				longhorn.ConditionStatusTrue, longhorn.ReplicaConditionReasonWaitForBackingImageWaiting, "")
 			return nil, nil
 		}
 	}
+
+	r.Status.Conditions = types.SetCondition(r.Status.Conditions, longhorn.ReplicaConditionTypeWaitForBackingImage,
+		longhorn.ConditionStatusFalse, "", "")
 
 	if IsRebuildingReplica(r) {
 		canStart, err := rc.CanStartRebuildingReplica(r)
@@ -385,7 +338,7 @@ func (rc *ReplicaController) CreateInstance(obj interface{}) (*longhorn.Instance
 		}
 	}
 
-	im, err := rc.ds.GetInstanceManagerByInstance(obj)
+	im, err := rc.ds.GetInstanceManagerByInstanceRO(obj)
 	if err != nil {
 		return nil, err
 	}
@@ -395,12 +348,12 @@ func (rc *ReplicaController) CreateInstance(obj interface{}) (*longhorn.Instance
 	}
 	defer c.Close()
 
-	v, err := rc.ds.GetVolume(r.Spec.VolumeName)
+	v, err := rc.ds.GetVolumeRO(r.Spec.VolumeName)
 	if err != nil {
 		return nil, err
 	}
 
-	engineCLIAPIVersion, err := rc.ds.GetEngineImageCLIAPIVersion(r.Spec.EngineImage)
+	engineCLIAPIVersion, err := rc.ds.GetEngineImageCLIAPIVersion(r.Spec.Image)
 	if err != nil {
 		return nil, err
 	}
@@ -649,7 +602,7 @@ func (rc *ReplicaController) deleteInstanceWithCLIAPIVersionOne(r *longhorn.Repl
 	return nil
 }
 
-func (rc *ReplicaController) deleteOldReplicaPod(pod *v1.Pod, r *longhorn.Replica) {
+func (rc *ReplicaController) deleteOldReplicaPod(pod *corev1.Pod, r *longhorn.Replica) {
 	// pod already stopped
 	if pod == nil {
 		return
@@ -675,10 +628,10 @@ func (rc *ReplicaController) deleteOldReplicaPod(pod *v1.Pod, r *longhorn.Replic
 	}
 
 	if err := rc.kubeClient.CoreV1().Pods(rc.namespace).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{}); err != nil {
-		rc.eventRecorder.Eventf(r, v1.EventTypeWarning, constant.EventReasonFailedStopping, "Error stopping pod for old replica %v: %v", pod.Name, err)
+		rc.eventRecorder.Eventf(r, corev1.EventTypeWarning, constant.EventReasonFailedStopping, "Error stopping pod for old replica %v: %v", pod.Name, err)
 		return
 	}
-	rc.eventRecorder.Eventf(r, v1.EventTypeNormal, constant.EventReasonStop, "Stops pod for old replica %v", pod.Name)
+	rc.eventRecorder.Eventf(r, corev1.EventTypeNormal, constant.EventReasonStop, "Stops pod for old replica %v", pod.Name)
 }
 
 func (rc *ReplicaController) GetInstance(obj interface{}) (*longhorn.InstanceProcess, error) {
@@ -692,12 +645,12 @@ func (rc *ReplicaController) GetInstance(obj interface{}) (*longhorn.InstancePro
 		err error
 	)
 	if r.Status.InstanceManagerName == "" {
-		im, err = rc.ds.GetInstanceManagerByInstance(obj)
+		im, err = rc.ds.GetInstanceManagerByInstanceRO(obj)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		im, err = rc.ds.GetInstanceManager(r.Status.InstanceManagerName)
+		im, err = rc.ds.GetInstanceManagerRO(r.Status.InstanceManagerName)
 		if err != nil {
 			return nil, err
 		}
@@ -728,7 +681,7 @@ func (rc *ReplicaController) LogInstance(ctx context.Context, obj interface{}) (
 		return nil, nil, fmt.Errorf("invalid object for replica instance log: %v", obj)
 	}
 
-	im, err := rc.ds.GetInstanceManager(r.Status.InstanceManagerName)
+	im, err := rc.ds.GetInstanceManagerRO(r.Status.InstanceManagerName)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -797,7 +750,7 @@ func (rc *ReplicaController) enqueueNodeAddOrDelete(obj interface{}) {
 	for diskName := range node.Spec.Disks {
 		if diskStatus, existed := node.Status.DiskStatus[diskName]; existed {
 			for replicaName := range diskStatus.ScheduledReplica {
-				if replica, err := rc.ds.GetReplica(replicaName); err == nil {
+				if replica, err := rc.ds.GetReplicaRO(replicaName); err == nil {
 					rc.enqueueReplica(replica)
 				}
 			}
@@ -927,4 +880,13 @@ func (rc *ReplicaController) enqueueAllRebuildingReplicaOnCurrentNode() {
 
 func (rc *ReplicaController) isResponsibleFor(r *longhorn.Replica) bool {
 	return isControllerResponsibleFor(rc.controllerID, rc.ds, r.Name, r.Spec.NodeID, r.Status.OwnerID)
+}
+
+func hasMatchingReplica(replica *longhorn.Replica, replicas []*longhorn.Replica) bool {
+	for _, r := range replicas {
+		if r.Name != replica.Name && r.Spec.DataDirectoryName == replica.Spec.DataDirectoryName {
+			return true
+		}
+	}
+	return false
 }

@@ -8,20 +8,22 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	clientset "k8s.io/client-go/kubernetes"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/controller"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
+
 	"github.com/longhorn/longhorn-manager/datastore"
-	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	"github.com/longhorn/longhorn-manager/types"
+
+	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 )
 
 type VolumeAttachmentController struct {
@@ -65,7 +67,7 @@ func NewLonghornVolumeAttachmentController(
 		ds: ds,
 
 		kubeClient:    kubeClient,
-		eventRecorder: eventBroadcaster.NewRecorder(scheme, v1.EventSource{Component: "longhorn-volume-attachment-controller"}),
+		eventRecorder: eventBroadcaster.NewRecorder(scheme, corev1.EventSource{Component: "longhorn-volume-attachment-controller"}),
 	}
 
 	ds.LHVolumeAttachmentInformer.AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{
@@ -207,7 +209,8 @@ func (vac *VolumeAttachmentController) handleErr(err error, key interface{}) {
 		return
 	}
 
-	vac.logger.WithError(err).Errorf("Failed to sync Longhorn VolumeAttachment %v", key)
+	log := vac.logger.WithField("LonghornVolumeAttachment", key)
+	handleReconcileErrorLogging(log, err, "Failed to sync Longhorn VolumeAttachment")
 	vac.queue.AddRateLimited(key)
 }
 
@@ -365,7 +368,7 @@ func (vac *VolumeAttachmentController) handleVolumeMigrationConfirmation(va *lon
 }
 
 func (vac *VolumeAttachmentController) checkMigratingEngineSyncSnapshots(va *longhorn.VolumeAttachment, vol *longhorn.Volume) (bool, error) {
-	engines, err := vac.ds.ListVolumeEngines(vol.Name)
+	engines, err := vac.ds.ListVolumeEnginesRO(vol.Name)
 	if err != nil {
 		return false, err
 	}
@@ -437,6 +440,8 @@ func (vac *VolumeAttachmentController) handleVolumeMigrationRollback(va *longhor
 }
 
 func (vac *VolumeAttachmentController) handleVolumeDetachment(va *longhorn.VolumeAttachment, vol *longhorn.Volume) {
+	log := getLoggerForLHVolumeAttachment(vac.logger, va)
+
 	// Volume is already trying to detach
 	if vol.Spec.NodeID == "" {
 		return
@@ -445,6 +450,8 @@ func (vac *VolumeAttachmentController) handleVolumeDetachment(va *longhorn.Volum
 	if !vac.shouldDoDetach(va, vol) {
 		return
 	}
+
+	log.Infof("Volume %v is selected to detach from node %v", vol.Name, vol.Spec.NodeID)
 
 	// There is no attachment ticket that request the current vol.Spec.NodeID.
 	// Therefore, set desire state of volume to empty
@@ -485,6 +492,7 @@ func (vac *VolumeAttachmentController) shouldDoDetach(va *longhorn.VolumeAttachm
 	}
 
 	if len(currentAttachmentTickets) == 0 {
+		log.Infof("Should detach volume %v because there is no matching attachment ticket", vol.Spec.NodeID)
 		return true
 	}
 
@@ -546,6 +554,8 @@ func hasWorkloadTicket(attachmentTickets map[string]*longhorn.AttachmentTicket, 
 }
 
 func (vac *VolumeAttachmentController) handleVolumeAttachment(va *longhorn.VolumeAttachment, vol *longhorn.Volume) {
+	log := getLoggerForLHVolumeAttachment(vac.logger, va)
+
 	// Wait for volume to be fully detached
 	if !isVolumeFullyDetached(vol) {
 		return
@@ -561,6 +571,8 @@ func (vac *VolumeAttachmentController) handleVolumeAttachment(va *longhorn.Volum
 	if attachmentTicket == nil {
 		return
 	}
+
+	log.Infof("Volume %v is selected to attach to node %v, ticket +%v", vol.Name, attachmentTicket.NodeID, attachmentTicket)
 
 	vol.Spec.NodeID = attachmentTicket.NodeID
 	setAttachmentParameter(attachmentTicket.Parameters, vol)
@@ -828,7 +840,7 @@ func isVolumeShareAvailable(vol *longhorn.Volume) bool {
 }
 
 func (vac *VolumeAttachmentController) isVolumeAvailableOnNode(volumeName, node string) bool {
-	es, _ := vac.ds.ListVolumeEngines(volumeName)
+	es, _ := vac.ds.ListVolumeEnginesRO(volumeName)
 	for _, e := range es {
 		if e.Spec.NodeID != node {
 			continue

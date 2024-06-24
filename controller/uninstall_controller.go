@@ -10,15 +10,16 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/time/rate"
 
-	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
+
+	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
 
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/types"
@@ -44,6 +45,7 @@ const (
 	CRDRecurringJobName           = "recurringjobs.longhorn.io"
 	CRDOrphanName                 = "orphans.longhorn.io"
 	CRDSnapshotName               = "snapshots.longhorn.io"
+	CRDObjectStoreName            = "objectstores.longhorn.io"
 
 	EnvLonghornNamespace = "LONGHORN_NAMESPACE"
 )
@@ -161,7 +163,10 @@ func NewUninstallController(
 		ds.SnapshotInformer.AddEventHandler(c.controlleeHandler())
 		cacheSyncs = append(cacheSyncs, ds.SnapshotInformer.HasSynced)
 	}
-
+	if _, err := extensionsClient.ApiextensionsV1().CustomResourceDefinitions().Get(context.TODO(), CRDObjectStoreName, metav1.GetOptions{}); err == nil {
+		ds.ObjectStoreInformer.AddEventHandler(c.controlleeHandler())
+		cacheSyncs = append(cacheSyncs, ds.ObjectStoreInformer.HasSynced)
+	}
 	c.cacheSyncs = cacheSyncs
 
 	return c
@@ -526,7 +531,36 @@ func (c *UninstallController) deleteCRDs() (bool, error) {
 		return true, c.deleteSystemRestores(systemRestores)
 	}
 
+	if objectStores, err := c.ds.ListObjectStores(); err != nil {
+		return true, err
+	} else if len(objectStores) > 0 {
+		c.logger.Infof("Found %d object endpoints remaining", len(objectStores))
+		return true, c.deleteObjectStores(objectStores)
+	}
+
 	return false, nil
+}
+
+func (c *UninstallController) deleteObjectStores(stores map[string]*longhorn.ObjectStore) (err error) {
+	defer func() {
+		err = errors.Wrapf(err, "failed to delete object endpoints")
+	}()
+
+	for _, store := range stores {
+		timeout := metav1.NewTime(time.Now().Add(-gracePeriod))
+		if store.DeletionTimestamp == nil {
+			if err = c.ds.DeleteObjectStore(store.Name); err != nil {
+				err = errors.Wrap(err, "failed to mark for deletion")
+				return
+			}
+		} else if store.DeletionTimestamp.Before(&timeout) {
+			if err = c.ds.RemoveFinalizerForObjectStore(store); err != nil {
+				err = errors.Wrap(err, "failed to remove finalizer")
+				return
+			}
+		}
+	}
+	return
 }
 
 func (c *UninstallController) deleteVolumes(vols map[string]*longhorn.Volume) (err error) {
@@ -1004,36 +1038,6 @@ func (c *UninstallController) deleteDriver() (bool, error) {
 			continue
 		} else if driver.DeletionTimestamp == nil {
 			if err := c.ds.DeleteDeployment(name); err != nil {
-				log.Warn("Failed to mark for deletion")
-				wait = true
-				continue
-			}
-			log.Info("Marked for deletion")
-			wait = true
-			continue
-		}
-		log.Info("Already marked for deletion")
-		wait = true
-	}
-
-	servicesToClean := []string{
-		types.CSIAttacherName,
-		types.CSIProvisionerName,
-		types.CSIResizerName,
-		types.CSISnapshotterName,
-	}
-	for _, name := range servicesToClean {
-		log := getLoggerForUninstallService(c.logger, name)
-
-		if service, err := c.ds.GetService(c.namespace, name); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			log.WithError(err).Warn("Failed to get for deletion")
-			wait = true
-			continue
-		} else if service.DeletionTimestamp == nil {
-			if err := c.ds.DeleteService(c.namespace, name); err != nil {
 				log.Warn("Failed to mark for deletion")
 				wait = true
 				continue

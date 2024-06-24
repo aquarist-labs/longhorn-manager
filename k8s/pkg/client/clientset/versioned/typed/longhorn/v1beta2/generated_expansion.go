@@ -38,6 +38,8 @@ type InstanceManagerExpansion interface{}
 
 type NodeExpansion interface{}
 
+type ObjectStoreExpansion interface{}
+
 type OrphanExpansion interface{}
 
 type RecurringJobExpansion interface{}

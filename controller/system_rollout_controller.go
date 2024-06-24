@@ -281,7 +281,7 @@ func (c *SystemRolloutController) handleErr(err error, key interface{}) {
 		return
 	}
 
-	c.logger.WithError(err).Error("Worker error")
+	handleReconcileErrorLogging(c.logger, err, "Worker error")
 	c.queue.AddRateLimited(key)
 }
 
@@ -500,7 +500,7 @@ func (c *SystemRolloutController) syncController() error {
 			return errors.Wrapf(err, "failed to get SystemBackup %v", systemRestore.Spec.SystemBackup)
 		}
 
-		currentLonghornVersion, err := c.ds.GetSetting(types.SettingNameCurrentLonghornVersion)
+		currentLonghornVersion, err := c.ds.GetSettingWithAutoFillingRO(types.SettingNameCurrentLonghornVersion)
 		if err != nil {
 			return err
 		}

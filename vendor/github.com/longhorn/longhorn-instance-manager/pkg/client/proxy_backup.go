@@ -4,16 +4,26 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/golang/protobuf/ptypes/empty"
 	"github.com/pkg/errors"
 
 	rpc "github.com/longhorn/longhorn-instance-manager/pkg/imrpc"
 )
 
-func (c *ProxyClient) SnapshotBackup(backendStoreDriver, engineName, serviceAddress, backupName, snapshotName, backupTarget,
-	backingImageName, backingImageChecksum, compressionMethod string, concurrentLimit int, storageClassName string,
-	labels map[string]string, envs []string) (backupID, replicaAddress string, err error) {
+func (c *ProxyClient) CleanupBackupMountPoints() (err error) {
+	_, err = c.service.CleanupBackupMountPoints(getContextWithGRPCTimeout(c.ctx), &empty.Empty{})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *ProxyClient) SnapshotBackup(backendStoreDriver, engineName, volumeName, serviceAddress, backupName,
+	snapshotName, backupTarget, backingImageName, backingImageChecksum, compressionMethod string, concurrentLimit int,
+	storageClassName, objectStoreBackup string, labels map[string]string, envs []string) (backupID, replicaAddress string, err error) {
 	input := map[string]string{
 		"engineName":     engineName,
+		"volumeName":     volumeName,
 		"serviceAddress": serviceAddress,
 	}
 	if err := validateProxyMethodParameters(input); err != nil {
@@ -34,6 +44,7 @@ func (c *ProxyClient) SnapshotBackup(backendStoreDriver, engineName, serviceAddr
 			Address:            serviceAddress,
 			EngineName:         engineName,
 			BackendStoreDriver: rpc.BackendStoreDriver(driver),
+			VolumeName:         volumeName,
 		},
 		Envs:                 envs,
 		BackupName:           backupName,
@@ -44,6 +55,7 @@ func (c *ProxyClient) SnapshotBackup(backendStoreDriver, engineName, serviceAddr
 		CompressionMethod:    compressionMethod,
 		ConcurrentLimit:      int32(concurrentLimit),
 		StorageClassName:     storageClassName,
+		ObjectStoreBackup:    objectStoreBackup,
 		Labels:               labels,
 	}
 	recv, err := c.service.SnapshotBackup(getContextWithGRPCTimeout(c.ctx), req)
@@ -54,9 +66,11 @@ func (c *ProxyClient) SnapshotBackup(backendStoreDriver, engineName, serviceAddr
 	return recv.BackupId, recv.Replica, nil
 }
 
-func (c *ProxyClient) SnapshotBackupStatus(backendStoreDriver, engineName, serviceAddress, backupName, replicaAddress string) (status *SnapshotBackupStatus, err error) {
+func (c *ProxyClient) SnapshotBackupStatus(backendStoreDriver, engineName, volumeName, serviceAddress, backupName,
+	replicaAddress, replicaName string) (status *SnapshotBackupStatus, err error) {
 	input := map[string]string{
 		"engineName":     engineName,
+		"volumeName":     volumeName,
 		"serviceAddress": serviceAddress,
 		"backupName":     backupName,
 	}
@@ -78,9 +92,13 @@ func (c *ProxyClient) SnapshotBackupStatus(backendStoreDriver, engineName, servi
 			Address:            serviceAddress,
 			EngineName:         engineName,
 			BackendStoreDriver: rpc.BackendStoreDriver(driver),
+			VolumeName:         volumeName,
 		},
 		BackupName:     backupName,
 		ReplicaAddress: replicaAddress,
+		// For now, it is unlikely we actually know replicaName. Pass it anyway, as an empty string will not cause a
+		// validation failure and this may change in the future.
+		ReplicaName: replicaName,
 	}
 	recv, err := c.service.SnapshotBackupStatus(getContextWithGRPCTimeout(c.ctx), req)
 	if err != nil {
@@ -98,13 +116,15 @@ func (c *ProxyClient) SnapshotBackupStatus(backendStoreDriver, engineName, servi
 	return status, nil
 }
 
-func (c *ProxyClient) BackupRestore(backendStoreDriver, engineName, serviceAddress, url, target, volumeName string, envs []string, concurrentLimit int) (err error) {
+func (c *ProxyClient) BackupRestore(backendStoreDriver, engineName, volumeName, serviceAddress, url, target,
+	backupVolumeName string, envs []string, concurrentLimit int) (err error) {
 	input := map[string]string{
-		"engineName":     engineName,
-		"serviceAddress": serviceAddress,
-		"url":            url,
-		"target":         target,
-		"volumeName":     volumeName,
+		"engineName":       engineName,
+		"volumeName":       volumeName,
+		"serviceAddress":   serviceAddress,
+		"url":              url,
+		"target":           target,
+		"backupVolumeName": backupVolumeName,
 	}
 	if err := validateProxyMethodParameters(input); err != nil {
 		return errors.Wrap(err, "failed to restore backup to volume")
@@ -128,11 +148,14 @@ func (c *ProxyClient) BackupRestore(backendStoreDriver, engineName, serviceAddre
 			Address:            serviceAddress,
 			EngineName:         engineName,
 			BackendStoreDriver: rpc.BackendStoreDriver(driver),
+			// This is the name we will use for validation when communicating with the restoring engine.
+			VolumeName: volumeName,
 		},
-		Envs:            envs,
-		Url:             url,
-		Target:          target,
-		VolumeName:      volumeName,
+		Envs:   envs,
+		Url:    url,
+		Target: target,
+		// Historically, we have passed backupVolumeName as VolumeName here.
+		VolumeName:      backupVolumeName,
 		ConcurrentLimit: int32(concurrentLimit),
 	}
 	recv, err := c.service.BackupRestore(getContextWithGRPCTimeout(c.ctx), req)
@@ -154,9 +177,11 @@ func (c *ProxyClient) BackupRestore(backendStoreDriver, engineName, serviceAddre
 	return nil
 }
 
-func (c *ProxyClient) BackupRestoreStatus(backendStoreDriver, engineName, serviceAddress string) (status map[string]*BackupRestoreStatus, err error) {
+func (c *ProxyClient) BackupRestoreStatus(backendStoreDriver, engineName, volumeName,
+	serviceAddress string) (status map[string]*BackupRestoreStatus, err error) {
 	input := map[string]string{
 		"engineName":     engineName,
+		"volumeName":     volumeName,
 		"serviceAddress": serviceAddress,
 	}
 	if err := validateProxyMethodParameters(input); err != nil {
@@ -174,8 +199,9 @@ func (c *ProxyClient) BackupRestoreStatus(backendStoreDriver, engineName, servic
 
 	req := &rpc.ProxyEngineRequest{
 		Address:            serviceAddress,
-		EngineName:         engineName,
 		BackendStoreDriver: rpc.BackendStoreDriver(driver),
+		EngineName:         engineName,
+		VolumeName:         volumeName,
 	}
 	recv, err := c.service.BackupRestoreStatus(getContextWithGRPCTimeout(c.ctx), req)
 	if err != nil {

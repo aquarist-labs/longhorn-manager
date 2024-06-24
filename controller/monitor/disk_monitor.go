@@ -16,9 +16,10 @@ import (
 
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/engineapi"
-	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	"github.com/longhorn/longhorn-manager/types"
 	"github.com/longhorn/longhorn-manager/util"
+
+	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 )
 
 const (
@@ -138,7 +139,7 @@ func (m *NodeMonitor) run(value interface{}) error {
 }
 
 func (m *NodeMonitor) newDiskServiceClient(node *longhorn.Node) (*engineapi.DiskService, error) {
-	im, err := m.ds.GetDefaultInstanceManagerByNode(m.nodeName)
+	im, err := m.ds.GetDefaultInstanceManagerByNodeRO(m.nodeName)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to get default instance manager for node %v", m.nodeName)
 	}

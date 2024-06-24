@@ -9,18 +9,19 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
-	clientset "k8s.io/client-go/kubernetes"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/controller"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	systembackupstore "github.com/longhorn/backupstore/systembackup"
 
@@ -74,7 +75,7 @@ func NewBackupTargetController(
 		ds: ds,
 
 		kubeClient:    kubeClient,
-		eventRecorder: eventBroadcaster.NewRecorder(scheme, v1.EventSource{Component: "longhorn-backup-target-controller"}),
+		eventRecorder: eventBroadcaster.NewRecorder(scheme, corev1.EventSource{Component: "longhorn-backup-target-controller"}),
 
 		proxyConnCounter: proxyConnCounter,
 	}
@@ -190,14 +191,15 @@ func (btc *BackupTargetController) handleErr(err error, key interface{}) {
 		return
 	}
 
+	log := btc.logger.WithField("BackupTarget", key)
 	if btc.queue.NumRequeues(key) < maxRetries {
-		btc.logger.WithError(err).Errorf("Failed to sync Longhorn backup target %v", key)
+		handleReconcileErrorLogging(log, err, "Failed to sync Longhorn backup target")
 		btc.queue.AddRateLimited(key)
 		return
 	}
 
 	utilruntime.HandleError(err)
-	btc.logger.WithError(err).Errorf("Dropping Longhorn backup target %v out of the queue", key)
+	handleReconcileErrorLogging(log, err, "Dropping Longhorn backup target out of the queue")
 	btc.queue.Forget(key)
 }
 
@@ -212,7 +214,7 @@ func getLoggerForBackupTarget(logger logrus.FieldLogger, backupTarget *longhorn.
 }
 
 func getBackupTarget(controllerID string, backupTarget *longhorn.BackupTarget, ds *datastore.DataStore, log logrus.FieldLogger, proxyConnCounter util.Counter) (engineClientProxy engineapi.EngineClientProxy, backupTargetClient *engineapi.BackupTargetClient, err error) {
-	instanceManager, err := ds.GetDefaultInstanceManagerByNode(controllerID)
+	instanceManager, err := ds.GetDefaultInstanceManagerByNodeRO(controllerID)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "failed to get default engine instance manager for proxy client")
 	}
@@ -382,6 +384,11 @@ func (btc *BackupTargetController) cleanUpAllMounts(backupTarget *longhorn.Backu
 		return err
 	}
 	defer engineClientProxy.Close()
+	// cleanup mount points in instance-manager
+	if err := engineClientProxy.CleanupBackupMountPoints(); err != nil {
+		return err
+	}
+	// clean mount points in longhorn-manager
 	err = backupTargetClient.BackupCleanUpAllMounts()
 	return err
 }

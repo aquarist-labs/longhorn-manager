@@ -10,12 +10,13 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/longhorn/longhorn-manager/engineapi"
-	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	"github.com/longhorn/longhorn-manager/manager"
 	"github.com/longhorn/longhorn-manager/types"
+
+	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 )
 
 const (
@@ -49,7 +50,7 @@ func NodeHasDefaultEngineImage(m *manager.VolumeManager) func(req *http.Request)
 		if err != nil {
 			return "", err
 		}
-		nodes, err := m.ListReadyNodesWithEngineImage(engineImage)
+		nodes, err := m.ListReadyNodesContainingEngineImageRO(engineImage)
 		if err != nil {
 			return "", err
 		}
@@ -180,7 +181,7 @@ func UploadParametersForBackingImage(m *manager.VolumeManager) func(req *http.Re
 		if err != nil {
 			return nil, err
 		}
-		if pod.Status.Phase != v1.PodRunning || pod.Status.PodIP == "" {
+		if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" {
 			return nil, fmt.Errorf("backing image data source pod is not ready for uploading")
 		}
 		bids, err := m.GetBackingImageDataSource(name)

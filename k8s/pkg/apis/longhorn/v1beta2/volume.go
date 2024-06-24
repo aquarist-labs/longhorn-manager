@@ -99,9 +99,10 @@ type VolumeCloneStatus struct {
 }
 
 const (
-	VolumeConditionTypeScheduled        = "scheduled"
-	VolumeConditionTypeRestore          = "restore"
-	VolumeConditionTypeTooManySnapshots = "toomanysnapshots"
+	VolumeConditionTypeScheduled           = "Scheduled"
+	VolumeConditionTypeRestore             = "Restore"
+	VolumeConditionTypeTooManySnapshots    = "TooManySnapshots"
+	VolumeConditionTypeWaitForBackingImage = "WaitForBackingImage"
 )
 
 const (
@@ -110,6 +111,8 @@ const (
 	VolumeConditionReasonRestoreInProgress             = "RestoreInProgress"
 	VolumeConditionReasonRestoreFailure                = "RestoreFailure"
 	VolumeConditionReasonTooManySnapshots              = "TooManySnapshots"
+	VolumeConditionReasonWaitForBackingImageFailed     = "GetBackingImageFailed"
+	VolumeConditionReasonWaitForBackingImageWaiting    = "Waiting"
 )
 
 type SnapshotDataIntegrity string
@@ -146,6 +149,15 @@ const (
 	ReplicaZoneSoftAntiAffinityDefault  = ReplicaZoneSoftAntiAffinity("ignored")
 	ReplicaZoneSoftAntiAffinityEnabled  = ReplicaZoneSoftAntiAffinity("enabled")
 	ReplicaZoneSoftAntiAffinityDisabled = ReplicaZoneSoftAntiAffinity("disabled")
+)
+
+// +kubebuilder:validation:Enum=ignored;enabled;disabled
+type ReplicaDiskSoftAntiAffinity string
+
+const (
+	ReplicaDiskSoftAntiAffinityDefault  = ReplicaDiskSoftAntiAffinity("ignored")
+	ReplicaDiskSoftAntiAffinityEnabled  = ReplicaDiskSoftAntiAffinity("enabled")
+	ReplicaDiskSoftAntiAffinityDisabled = ReplicaDiskSoftAntiAffinity("disabled")
 )
 
 type BackendStoreDriverType string
@@ -215,8 +227,11 @@ type VolumeSpec struct {
 	NodeID string `json:"nodeID"`
 	// +optional
 	MigrationNodeID string `json:"migrationNodeID"`
+	// Deprecated: Replaced by field `image`.
 	// +optional
 	EngineImage string `json:"engineImage"`
+	// +optional
+	Image string `json:"image"`
 	// +optional
 	BackingImage string `json:"backingImage"`
 	// +optional
@@ -231,12 +246,15 @@ type VolumeSpec struct {
 	RevisionCounterDisabled bool `json:"revisionCounterDisabled"`
 	// +optional
 	UnmapMarkSnapChainRemoved UnmapMarkSnapChainRemoved `json:"unmapMarkSnapChainRemoved"`
-	// Replica soft anti affinity of the volume. Set enabled to allow replicas to be scheduled on the same node
+	// Replica soft anti affinity of the volume. Set enabled to allow replicas to be scheduled on the same node.
 	// +optional
 	ReplicaSoftAntiAffinity ReplicaSoftAntiAffinity `json:"replicaSoftAntiAffinity"`
-	// Replica zone soft anti affinity of the volume. Set enabled to allow replicas to be scheduled in the same zone
+	// Replica zone soft anti affinity of the volume. Set enabled to allow replicas to be scheduled in the same zone.
 	// +optional
 	ReplicaZoneSoftAntiAffinity ReplicaZoneSoftAntiAffinity `json:"replicaZoneSoftAntiAffinity"`
+	// Replica disk soft anti affinity of the volume. Set enabled to allow replicas to be scheduled in the same disk.
+	// +optional
+	ReplicaDiskSoftAntiAffinity ReplicaDiskSoftAntiAffinity `json:"replicaDiskSoftAntiAffinity"`
 	// +optional
 	LastAttachedBy string `json:"lastAttachedBy"`
 	// +optional

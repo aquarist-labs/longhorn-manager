@@ -138,14 +138,15 @@ func (c *RecurringJobController) handleErr(err error, key interface{}) {
 		return
 	}
 
+	log := c.logger.WithField("RecurringJob", key)
 	if c.queue.NumRequeues(key) < maxRetries {
-		logrus.WithError(err).Errorf("Failed to sync Longhorn recurring job %v", key)
+		handleReconcileErrorLogging(log, err, "Failed to sync Longhorn recurring job")
 		c.queue.AddRateLimited(key)
 		return
 	}
 
 	utilruntime.HandleError(err)
-	logrus.WithError(err).Errorf("Dropping Longhorn recurring job %v out of the queue", key)
+	handleReconcileErrorLogging(log, err, "Dropping Longhorn recurring job out of the queue")
 	c.queue.Forget(key)
 }
 
@@ -458,7 +459,7 @@ func (c *RecurringJobController) newCronJob(recurringJob *longhorn.RecurringJob)
 	if err != nil {
 		return nil, err
 	}
-	priorityClass, err := c.ds.GetSetting(types.SettingNamePriorityClass)
+	priorityClass, err := c.ds.GetSettingWithAutoFillingRO(types.SettingNamePriorityClass)
 	if err != nil {
 		return nil, err
 	}
@@ -466,7 +467,7 @@ func (c *RecurringJobController) newCronJob(recurringJob *longhorn.RecurringJob)
 	if err != nil {
 		return nil, err
 	}
-	registrySecretSetting, err := c.ds.GetSetting(types.SettingNameRegistrySecret)
+	registrySecretSetting, err := c.ds.GetSettingWithAutoFillingRO(types.SettingNameRegistrySecret)
 	if err != nil {
 		return nil, err
 	}

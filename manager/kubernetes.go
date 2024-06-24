@@ -143,3 +143,12 @@ func (m *VolumeManager) PVCCreate(name, namespace, pvcName string) (v *longhorn.
 func (m *VolumeManager) GetDaemonSetRO(name string) (*appsv1.DaemonSet, error) {
 	return m.ds.GetDaemonSet(name)
 }
+
+func (m *VolumeManager) GetLonghornNamespace() string {
+	ns, _ := m.ds.GetLonghornNamespace()
+	return ns.Name
+}
+
+func (m *VolumeManager) ListDeploymentsByLabels(matchLabels map[string]string) ([]*appsv1.Deployment, error) {
+	return m.ds.ListDeploymentsByLabels(matchLabels)
+}

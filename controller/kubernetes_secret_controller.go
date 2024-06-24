@@ -1,24 +1,24 @@
 package controller
 
 import (
-	"context"
 	"fmt"
 	"time"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	clientset "k8s.io/client-go/kubernetes"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/controller"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/types"
@@ -66,14 +66,14 @@ func NewKubernetesSecretController(
 		ds: ds,
 
 		kubeClient:    kubeClient,
-		eventRecorder: eventBroadcaster.NewRecorder(scheme, v1.EventSource{Component: "longhorn-kubernetes-secret-controller"}),
+		eventRecorder: eventBroadcaster.NewRecorder(scheme, corev1.EventSource{Component: "longhorn-kubernetes-secret-controller"}),
 	}
 
 	ds.SecretInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: ks.enqueueSecretChange,
 		UpdateFunc: func(old, cur interface{}) {
-			oldSecret := old.(*v1.Secret)
-			curSecret := cur.(*v1.Secret)
+			oldSecret := old.(*corev1.Secret)
+			curSecret := cur.(*corev1.Secret)
 			if curSecret.ResourceVersion == oldSecret.ResourceVersion {
 				// Periodic resync will send update events for all known secrets.
 				// Two different versions of the same secret will always have different RVs.
@@ -127,13 +127,14 @@ func (ks *KubernetesSecretController) handleErr(err error, key interface{}) {
 		return
 	}
 
+	log := ks.logger.WithField("Secret", key)
 	if ks.queue.NumRequeues(key) < maxRetries {
-		ks.logger.WithError(err).Errorf("Failed to sync Secret %v", key)
+		handleReconcileErrorLogging(log, err, "Failed to sync Secret")
 		ks.queue.AddRateLimited(key)
 		return
 	}
 
-	ks.logger.WithError(err).Errorf("Dropping Secret %v out of the queue", key)
+	handleReconcileErrorLogging(log, err, "Dropping Secret out of the queue")
 	ks.queue.Forget(key)
 	utilruntime.HandleError(err)
 }
@@ -242,7 +243,10 @@ func (ks *KubernetesSecretController) annotateAWSIAMRoleArn(awsIAMRoleArn string
 		}
 
 		ks.logger.Infof("Updating AWS IAM role for pod %v/%v", pod.Namespace, pod.Name)
-		if _, err = ks.kubeClient.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, metav1.UpdateOptions{}); err != nil {
+		if _, err := ks.ds.UpdatePod(pod); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
 			return err
 		}
 	}

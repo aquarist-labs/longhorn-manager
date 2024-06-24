@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -13,11 +14,12 @@ import (
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
 
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 
-	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	"github.com/longhorn/longhorn-manager/meta"
 	"github.com/longhorn/longhorn-manager/util"
+
+	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 )
 
 const (
@@ -48,6 +50,8 @@ const (
 	SettingNameDefaultInstanceManagerImage                              = SettingName("default-instance-manager-image")
 	SettingNameDefaultBackingImageManagerImage                          = SettingName("default-backing-image-manager-image")
 	SettingNameSupportBundleManagerImage                                = SettingName("support-bundle-manager-image")
+	SettingNameObjectStoreImage                                         = SettingName("object-store-image")
+	SettingNameObjectStoreUIImage                                       = SettingName("object-store-ui-image")
 	SettingNameReplicaSoftAntiAffinity                                  = SettingName("replica-soft-anti-affinity")
 	SettingNameReplicaAutoBalance                                       = SettingName("replica-auto-balance")
 	SettingNameStorageOverProvisioningPercentage                        = SettingName("storage-over-provisioning-percentage")
@@ -80,6 +84,7 @@ const (
 	SettingNameSystemManagedPodsImagePullPolicy                         = SettingName("system-managed-pods-image-pull-policy")
 	SettingNameAllowVolumeCreationWithDegradedAvailability              = SettingName("allow-volume-creation-with-degraded-availability")
 	SettingNameAutoCleanupSystemGeneratedSnapshot                       = SettingName("auto-cleanup-system-generated-snapshot")
+	SettingNameAutoCleanupRecurringJobBackupSnapshot                    = SettingName("auto-cleanup-recurring-job-backup-snapshot")
 	SettingNameConcurrentAutomaticEngineUpgradePerNodeLimit             = SettingName("concurrent-automatic-engine-upgrade-per-node-limit")
 	SettingNameBackingImageCleanupWaitInterval                          = SettingName("backing-image-cleanup-wait-interval")
 	SettingNameBackingImageRecoveryWaitInterval                         = SettingName("backing-image-recovery-wait-interval")
@@ -107,6 +112,9 @@ const (
 	SettingNameV2DataEngine                                             = SettingName("v2-data-engine")
 	SettingNameV2DataEngineHugepageLimit                                = SettingName("v2-data-engine-hugepage-limit")
 	SettingNameOfflineReplicaRebuilding                                 = SettingName("offline-replica-rebuilding")
+	SettingNameReplicaDiskSoftAntiAffinity                              = SettingName("replica-disk-soft-anti-affinity")
+	SettingNameAllowEmptyNodeSelectorVolume                             = SettingName("allow-empty-node-selector-volume")
+	SettingNameAllowEmptyDiskSelectorVolume                             = SettingName("allow-empty-disk-selector-volume")
 )
 
 var (
@@ -120,6 +128,8 @@ var (
 		SettingNameDefaultInstanceManagerImage,
 		SettingNameDefaultBackingImageManagerImage,
 		SettingNameSupportBundleManagerImage,
+		SettingNameObjectStoreImage,
+		SettingNameObjectStoreUIImage,
 		SettingNameReplicaSoftAntiAffinity,
 		SettingNameReplicaAutoBalance,
 		SettingNameStorageOverProvisioningPercentage,
@@ -152,6 +162,7 @@ var (
 		SettingNameSystemManagedPodsImagePullPolicy,
 		SettingNameAllowVolumeCreationWithDegradedAvailability,
 		SettingNameAutoCleanupSystemGeneratedSnapshot,
+		SettingNameAutoCleanupRecurringJobBackupSnapshot,
 		SettingNameConcurrentAutomaticEngineUpgradePerNodeLimit,
 		SettingNameBackingImageCleanupWaitInterval,
 		SettingNameBackingImageRecoveryWaitInterval,
@@ -179,6 +190,9 @@ var (
 		SettingNameV2DataEngine,
 		SettingNameV2DataEngineHugepageLimit,
 		SettingNameOfflineReplicaRebuilding,
+		SettingNameReplicaDiskSoftAntiAffinity,
+		SettingNameAllowEmptyNodeSelectorVolume,
+		SettingNameAllowEmptyDiskSelectorVolume,
 	}
 )
 
@@ -218,6 +232,8 @@ var (
 		SettingNameDefaultInstanceManagerImage:                              SettingDefinitionDefaultInstanceManagerImage,
 		SettingNameDefaultBackingImageManagerImage:                          SettingDefinitionDefaultBackingImageManagerImage,
 		SettingNameSupportBundleManagerImage:                                SettingDefinitionSupportBundleManagerImage,
+		SettingNameObjectStoreImage:                                         SettingDefinitionObjectStoreImage,
+		SettingNameObjectStoreUIImage:                                       SettingDefinitionObjectStoreUIImage,
 		SettingNameReplicaSoftAntiAffinity:                                  SettingDefinitionReplicaSoftAntiAffinity,
 		SettingNameReplicaAutoBalance:                                       SettingDefinitionReplicaAutoBalance,
 		SettingNameStorageOverProvisioningPercentage:                        SettingDefinitionStorageOverProvisioningPercentage,
@@ -250,6 +266,7 @@ var (
 		SettingNameSystemManagedPodsImagePullPolicy:                         SettingDefinitionSystemManagedPodsImagePullPolicy,
 		SettingNameAllowVolumeCreationWithDegradedAvailability:              SettingDefinitionAllowVolumeCreationWithDegradedAvailability,
 		SettingNameAutoCleanupSystemGeneratedSnapshot:                       SettingDefinitionAutoCleanupSystemGeneratedSnapshot,
+		SettingNameAutoCleanupRecurringJobBackupSnapshot:                    SettingDefinitionAutoCleanupRecurringJobBackupSnapshot,
 		SettingNameConcurrentAutomaticEngineUpgradePerNodeLimit:             SettingDefinitionConcurrentAutomaticEngineUpgradePerNodeLimit,
 		SettingNameBackingImageCleanupWaitInterval:                          SettingDefinitionBackingImageCleanupWaitInterval,
 		SettingNameBackingImageRecoveryWaitInterval:                         SettingDefinitionBackingImageRecoveryWaitInterval,
@@ -277,6 +294,9 @@ var (
 		SettingNameV2DataEngine:                                             SettingDefinitionV2DataEngine,
 		SettingNameV2DataEngineHugepageLimit:                                SettingDefinitionV2DataEngineHugepageLimit,
 		SettingNameOfflineReplicaRebuilding:                                 SettingDefinitionOfflineReplicaRebuilding,
+		SettingNameReplicaDiskSoftAntiAffinity:                              SettingDefinitionReplicaDiskSoftAntiAffinity,
+		SettingNameAllowEmptyNodeSelectorVolume:                             SettingDefinitionAllowEmptyNodeSelectorVolume,
+		SettingNameAllowEmptyDiskSelectorVolume:                             SettingDefinitionAllowEmptyDiskSelectorVolume,
 	}
 
 	SettingDefinitionBackupTarget = SettingDefinition{
@@ -403,6 +423,24 @@ var (
 		Type:        SettingTypeString,
 		Required:    true,
 		ReadOnly:    false,
+	}
+
+	SettingDefinitionObjectStoreImage = SettingDefinition{
+		DisplayName: "Object Store Image",
+		Description: "The container image used by the manager when deploying an object storage gateway",
+		Category:    SettingCategoryGeneral,
+		Type:        SettingTypeString,
+		Required:    true,
+		ReadOnly:    true,
+	}
+
+	SettingDefinitionObjectStoreUIImage = SettingDefinition{
+		DisplayName: "Object Store UI Image",
+		Description: "The container image used by the manager when deploying an object storage ui instance",
+		Category:    SettingCategoryGeneral,
+		Type:        SettingTypeString,
+		Required:    true,
+		ReadOnly:    true,
 	}
 
 	SettingDefinitionReplicaSoftAntiAffinity = SettingDefinition{
@@ -618,8 +656,8 @@ var (
 	}
 
 	SettingDefinitionAutoDeletePodWhenVolumeDetachedUnexpectedly = SettingDefinition{
-		DisplayName: "Automatically Delete Workload Pod when The ReadWriteOnce (RWO) Volume Is Detached Unexpectedly",
-		Description: "If enabled, Longhorn will automatically delete the workload pod that is managed by a controller (e.g. deployment, statefulset, daemonset, etc...) when Longhorn ReadWriteOnce(RWO) volume is detached unexpectedly (e.g. during Kubernetes upgrade, Docker reboot, or network disconnect). " +
+		DisplayName: "Automatically Delete Workload Pod when The Volume Is Detached Unexpectedly",
+		Description: "If enabled, Longhorn will automatically delete the workload pod that is managed by a controller (e.g. deployment, statefulset, daemonset, etc...) when Longhorn volume is detached unexpectedly (e.g. during Kubernetes upgrade, Docker reboot, or network disconnect). " +
 			"By deleting the pod, its controller restarts the pod and Kubernetes handles volume reattachment and remount. \n\n" +
 			"If disabled, Longhorn will not delete the workload pod that is managed by a controller. You will have to manually restart the pod to reattach and remount the volume. \n\n" +
 			"**Note:** This setting doesn't apply to the workload pods that don't have a controller. Longhorn never deletes them.",
@@ -682,7 +720,9 @@ var (
 
 	SettingDefinitionNodeDrainPolicy = SettingDefinition{
 		DisplayName: "Node Drain Policy",
-		Description: "Define the policy to use when a node with the last healthy replica of a volume is drained. \n" +
+		Description: "Define the policy to use when a node with the last healthy replica of a volume is drained.\n" +
+			"- **block-for-eviction** Longhorn will automatically evict all replicas and block the drain until eviction is complete.\n" +
+			"- **block-for-eviction-if-contains-last-replica** Longhorn will automatically evict any replicas that don't have a healthy counterpart and block the drain until eviction is complete.\n" +
 			"- **block-if-contains-last-replica** Longhorn will block the drain when the node contains the last healthy replica of a volume.\n" +
 			"- **allow-if-replica-is-stopped** Longhorn will allow the drain when the node contains the last healthy replica of a volume but the replica is stopped. WARNING: possible data loss if the node is removed after draining. Select this option if you want to drain the node and do in-place upgrade/maintenance.\n" +
 			"- **always-allow** Longhorn will allow the drain even though the node contains the last healthy replica of a volume. WARNING: possible data loss if the node is removed after draining. Also possible data corruption if the last replica was running during the draining.\n",
@@ -692,6 +732,8 @@ var (
 		ReadOnly: false,
 		Default:  string(NodeDrainPolicyBlockIfContainsLastReplica),
 		Choices: []string{
+			string(NodeDrainPolicyBlockForEviction),
+			string(NodeDrainPolicyBlockForEvictionIfContainsLastReplica),
 			string(NodeDrainPolicyBlockIfContainsLastReplica),
 			string(NodeDrainPolicyAllowIfReplicaIsStopped),
 			string(NodeDrainPolicyAlwaysAllow),
@@ -787,6 +829,16 @@ var (
 	SettingDefinitionAutoCleanupSystemGeneratedSnapshot = SettingDefinition{
 		DisplayName: "Automatically Cleanup System Generated Snapshot",
 		Description: "This setting enables Longhorn to automatically cleanup the system generated snapshot before and after replica rebuilding.",
+		Category:    SettingCategorySnapshot,
+		Type:        SettingTypeBool,
+		Required:    true,
+		ReadOnly:    false,
+		Default:     "true",
+	}
+
+	SettingDefinitionAutoCleanupRecurringJobBackupSnapshot = SettingDefinition{
+		DisplayName: "Automatically Cleanup Recurring Job Backup Snapshot",
+		Description: "This setting enables Longhorn to automatically cleanup the snapshot generated by a recurring backup job.",
 		Category:    SettingCategorySnapshot,
 		Type:        SettingTypeBool,
 		Required:    true,
@@ -1103,6 +1155,36 @@ var (
 		ReadOnly:    true,
 		Default:     "1024",
 	}
+
+	SettingDefinitionReplicaDiskSoftAntiAffinity = SettingDefinition{
+		DisplayName: "Replica Disk Level Soft Anti-Affinity",
+		Description: "Allow scheduling on disks with existing healthy replicas of the same volume",
+		Category:    SettingCategoryScheduling,
+		Type:        SettingTypeBool,
+		Required:    true,
+		ReadOnly:    false,
+		Default:     "true",
+	}
+
+	SettingDefinitionAllowEmptyNodeSelectorVolume = SettingDefinition{
+		DisplayName: "Allow Scheduling Empty Node Selector Volumes To Any Node",
+		Description: "Allow replica of the volume without node selector to be scheduled on node with tags, default true",
+		Category:    SettingCategoryScheduling,
+		Type:        SettingTypeBool,
+		Required:    true,
+		ReadOnly:    false,
+		Default:     "true",
+	}
+
+	SettingDefinitionAllowEmptyDiskSelectorVolume = SettingDefinition{
+		DisplayName: "Allow Scheduling Empty Disk Selector Volumes To Any Disk",
+		Description: "Allow replica of the volume without disk selector to be scheduled on disk with tags, default true",
+		Category:    SettingCategoryScheduling,
+		Type:        SettingTypeBool,
+		Required:    true,
+		ReadOnly:    false,
+		Default:     "true",
+	}
 )
 
 type NodeDownPodDeletionPolicy string
@@ -1114,12 +1196,14 @@ const (
 	NodeDownPodDeletionPolicyDeleteBothStatefulsetAndDeploymentPod = NodeDownPodDeletionPolicy("delete-both-statefulset-and-deployment-pod")
 )
 
-type NodeWithLastHealthyReplicaDrainPolicy string
+type NodeDrainPolicy string
 
 const (
-	NodeDrainPolicyBlockIfContainsLastReplica = NodeWithLastHealthyReplicaDrainPolicy("block-if-contains-last-replica")
-	NodeDrainPolicyAllowIfReplicaIsStopped    = NodeWithLastHealthyReplicaDrainPolicy("allow-if-replica-is-stopped")
-	NodeDrainPolicyAlwaysAllow                = NodeWithLastHealthyReplicaDrainPolicy("always-allow")
+	NodeDrainPolicyBlockForEviction                      = NodeDrainPolicy("block-for-eviction")
+	NodeDrainPolicyBlockForEvictionIfContainsLastReplica = NodeDrainPolicy("block-for-eviction-if-contains-last-replica")
+	NodeDrainPolicyBlockIfContainsLastReplica            = NodeDrainPolicy("block-if-contains-last-replica")
+	NodeDrainPolicyAllowIfReplicaIsStopped               = NodeDrainPolicy("allow-if-replica-is-stopped")
+	NodeDrainPolicyAlwaysAllow                           = NodeDrainPolicy("always-allow")
 )
 
 type SystemManagedPodsImagePullPolicy string
@@ -1134,7 +1218,12 @@ type CNIAnnotation string
 
 const (
 	CNIAnnotationNetworks      = CNIAnnotation("k8s.v1.cni.cncf.io/networks")
-	CNIAnnotationNetworkStatus = CNIAnnotation("k8s.v1.cni.cncf.io/networks-status")
+	CNIAnnotationNetworkStatus = CNIAnnotation("k8s.v1.cni.cncf.io/network-status")
+
+	// CNIAnnotationNetworksStatus is deprecated since Multus v3.6 and completely removed in v4.0.0.
+	// This exists to support older Multus versions.
+	// Ref: https://github.com/longhorn/longhorn/issues/6953
+	CNIAnnotationNetworksStatus = CNIAnnotation("k8s.v1.cni.cncf.io/networks-status")
 )
 
 const (
@@ -1157,10 +1246,20 @@ func ValidateSetting(name, value string) (err error) {
 
 	switch sName {
 	case SettingNameBackupTarget:
-		// check whether have $ or , have been set in BackupTarget
+		u, err := url.Parse(value)
+		if err != nil {
+			return errors.Wrapf(err, "failed to parse %v as url", value)
+		}
+
+		// Check whether have $ or , have been set in BackupTarget path
 		regStr := `[\$\,]`
+		if u.Scheme == "cifs" {
+			// The $ in SMB/CIFS URIs means that the share is hidden.
+			regStr = `[\,]`
+		}
+
 		reg := regexp.MustCompile(regStr)
-		findStr := reg.FindAllString(value, -1)
+		findStr := reg.FindAllString(u.Path, -1)
 		if len(findStr) != 0 {
 			return fmt.Errorf("value %s, contains %v", value, strings.Join(findStr, " or "))
 		}
@@ -1180,6 +1279,8 @@ func ValidateSetting(name, value string) (err error) {
 		fallthrough
 	case SettingNameAutoCleanupSystemGeneratedSnapshot:
 		fallthrough
+	case SettingNameAutoCleanupRecurringJobBackupSnapshot:
+		fallthrough
 	case SettingNameAutoDeletePodWhenVolumeDetachedUnexpectedly:
 		fallthrough
 	case SettingNameKubernetesClusterAutoscalerEnabled:
@@ -1198,7 +1299,13 @@ func ValidateSetting(name, value string) (err error) {
 		fallthrough
 	case SettingNameV2DataEngine:
 		fallthrough
+	case SettingNameAllowEmptyNodeSelectorVolume:
+		fallthrough
+	case SettingNameAllowEmptyDiskSelectorVolume:
+		fallthrough
 	case SettingNameAllowCollectingLonghornUsage:
+		fallthrough
+	case SettingNameReplicaDiskSoftAntiAffinity:
 		if value != "true" && value != "false" {
 			return fmt.Errorf("value %v of setting %v should be true or false", value, sName)
 		}
@@ -1375,7 +1482,7 @@ func isValidChoice(choices []string, value string) bool {
 	return len(choices) == 0
 }
 
-func GetCustomizedDefaultSettings(defaultSettingCM *v1.ConfigMap) (defaultSettings map[string]string, err error) {
+func GetCustomizedDefaultSettings(defaultSettingCM *corev1.ConfigMap) (defaultSettings map[string]string, err error) {
 	defaultSettingYAMLData := []byte(defaultSettingCM.Data[DefaultSettingYAMLFileName])
 
 	defaultSettings, err = getDefaultSettingFromYAML(defaultSettingYAMLData)
@@ -1437,8 +1544,8 @@ func getDefaultSettingFromYAML(defaultSettingYAMLData []byte) (map[string]string
 	return defaultSettings, nil
 }
 
-func UnmarshalTolerations(tolerationSetting string) ([]v1.Toleration, error) {
-	tolerations := []v1.Toleration{}
+func UnmarshalTolerations(tolerationSetting string) ([]corev1.Toleration, error) {
+	tolerations := []corev1.Toleration{}
 
 	tolerationSetting = strings.ReplaceAll(tolerationSetting, " ", "")
 	if tolerationSetting == "" {
@@ -1456,7 +1563,7 @@ func UnmarshalTolerations(tolerationSetting string) ([]v1.Toleration, error) {
 	return tolerations, nil
 }
 
-func parseToleration(taintToleration string) (*v1.Toleration, error) {
+func parseToleration(taintToleration string) (*corev1.Toleration, error) {
 	// The schema should be `key=value:effect` or `key:effect`
 	parts := strings.Split(taintToleration, ":")
 	if len(parts) != 2 {
@@ -1464,23 +1571,23 @@ func parseToleration(taintToleration string) (*v1.Toleration, error) {
 	}
 
 	// parse `key=value` or `key`
-	key, value, operator := "", "", v1.TolerationOperator("")
+	key, value, operator := "", "", corev1.TolerationOperator("")
 	pair := strings.Split(parts[0], "=")
 	switch len(pair) {
 	case 1:
-		key, value, operator = parts[0], "", v1.TolerationOpExists
+		key, value, operator = parts[0], "", corev1.TolerationOpExists
 	case 2:
-		key, value, operator = pair[0], pair[1], v1.TolerationOpEqual
+		key, value, operator = pair[0], pair[1], corev1.TolerationOpEqual
 	}
 
-	effect := v1.TaintEffect(parts[1])
+	effect := corev1.TaintEffect(parts[1])
 	switch effect {
-	case "", v1.TaintEffectNoExecute, v1.TaintEffectNoSchedule, v1.TaintEffectPreferNoSchedule:
+	case "", corev1.TaintEffectNoExecute, corev1.TaintEffectNoSchedule, corev1.TaintEffectPreferNoSchedule:
 	default:
 		return nil, fmt.Errorf("invalid effect: %v", parts[1])
 	}
 
-	return &v1.Toleration{
+	return &corev1.Toleration{
 		Key:      key,
 		Value:    value,
 		Operator: operator,
@@ -1514,6 +1621,7 @@ func UnmarshalNodeSelector(nodeSelectorSetting string) (map[string]string, error
 	return nodeSelector, nil
 }
 
+// GetSettingDefinition gets the setting definition in `settingDefinitions` by the parameter `name`
 func GetSettingDefinition(name SettingName) (SettingDefinition, bool) {
 	settingDefinitionsLock.RLock()
 	defer settingDefinitionsLock.RUnlock()
@@ -1521,6 +1629,7 @@ func GetSettingDefinition(name SettingName) (SettingDefinition, bool) {
 	return setting, ok
 }
 
+// SetSettingDefinition sets the setting definition in `settingDefinitions` by the parameter `name` and `definition`
 func SetSettingDefinition(name SettingName, definition SettingDefinition) {
 	settingDefinitionsLock.Lock()
 	defer settingDefinitionsLock.Unlock()

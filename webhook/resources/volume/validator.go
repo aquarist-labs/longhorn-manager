@@ -6,17 +6,19 @@ import (
 
 	"github.com/pkg/errors"
 
-	admissionregv1 "k8s.io/api/admissionregistration/v1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 
+	admissionregv1 "k8s.io/api/admissionregistration/v1"
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/engineapi"
-	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	"github.com/longhorn/longhorn-manager/types"
 	"github.com/longhorn/longhorn-manager/util"
 	"github.com/longhorn/longhorn-manager/webhook/admission"
+
+	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	werror "github.com/longhorn/longhorn-manager/webhook/error"
 )
 
@@ -83,13 +85,17 @@ func (v *volumeValidator) Create(request *admission.Request, newObj runtime.Obje
 		return werror.NewInvalidError(err.Error(), "")
 	}
 
+	if err := types.ValidateReplicaDiskSoftAntiAffinity(volume.Spec.ReplicaDiskSoftAntiAffinity); err != nil {
+		return werror.NewInvalidError(err.Error(), "")
+	}
+
 	if volume.Spec.BackingImage != "" {
 		if _, err := v.ds.GetBackingImage(volume.Spec.BackingImage); err != nil {
 			return werror.NewInvalidError(err.Error(), "")
 		}
 	}
 
-	if volume.Spec.EngineImage == "" {
+	if volume.Spec.Image == "" {
 		return werror.NewInvalidError("BUG: Invalid empty Setting.EngineImage", "")
 	}
 
@@ -107,7 +113,7 @@ func (v *volumeValidator) Create(request *admission.Request, newObj runtime.Obje
 
 	// Check engine version before disable revision counter
 	if volume.Spec.RevisionCounterDisabled {
-		if ok, err := v.canDisableRevisionCounter(volume.Spec.EngineImage); !ok {
+		if ok, err := v.canDisableRevisionCounter(volume.Spec.Image); !ok {
 			err := errors.Wrapf(err, "can not create volume with current engine image that doesn't support disable revision counter")
 			return werror.NewInvalidError(err.Error(), "")
 		}
@@ -168,6 +174,10 @@ func (v *volumeValidator) Update(request *admission.Request, oldObj runtime.Obje
 	}
 
 	if err := types.ValidateReplicaZoneSoftAntiAffinity(newVolume.Spec.ReplicaZoneSoftAntiAffinity); err != nil {
+		return werror.NewInvalidError(err.Error(), "")
+	}
+
+	if err := types.ValidateReplicaDiskSoftAntiAffinity(newVolume.Spec.ReplicaDiskSoftAntiAffinity); err != nil {
 		return werror.NewInvalidError(err.Error(), "")
 	}
 
@@ -259,6 +269,12 @@ func (v *volumeValidator) Update(request *admission.Request, oldObj runtime.Obje
 
 		if oldVolume.Spec.ReplicaZoneSoftAntiAffinity != newVolume.Spec.ReplicaZoneSoftAntiAffinity {
 			err := fmt.Errorf("changing replica zone soft anti-affinity for volume %v is not supported for backend store driver %v",
+				newVolume.Name, newVolume.Spec.BackendStoreDriver)
+			return werror.NewInvalidError(err.Error(), "")
+		}
+
+		if oldVolume.Spec.ReplicaDiskSoftAntiAffinity != newVolume.Spec.ReplicaDiskSoftAntiAffinity {
+			err := fmt.Errorf("changing replica disk soft anti-affinity for volume %v is not supported for backend store driver %v",
 				newVolume.Name, newVolume.Spec.BackendStoreDriver)
 			return werror.NewInvalidError(err.Error(), "")
 		}

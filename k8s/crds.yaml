@@ -635,6 +635,8 @@ spec:
                 description: The error messages when calling longhorn engine on listing or inspecting backups.
                 nullable: true
                 type: object
+              objectStoreBackup:
+                type: string
               ownerID:
                 description: The node ID on which the controller is responsible to reconcile this backup CR.
                 type: string
@@ -1324,6 +1326,7 @@ spec:
               disableFrontend:
                 type: boolean
               engineImage:
+                description: 'Deprecated: Replaced by field `image`.'
                 type: string
               frontend:
                 enum:
@@ -1331,6 +1334,8 @@ spec:
                 - iscsi
                 - nvmf
                 - ""
+                type: string
+              image:
                 type: string
               logRequested:
                 type: boolean
@@ -1941,6 +1946,8 @@ spec:
           status:
             description: NodeStatus defines the observed state of the Longhorn node
             properties:
+              autoEvicting:
+                type: boolean
               conditions:
                 items:
                   properties:
@@ -2023,6 +2030,220 @@ spec:
                     type: string
                 type: object
               zone:
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+status:
+  acceptedNames:
+    kind: ""
+    plural: ""
+  conditions: []
+  storedVersions: []
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.7.0
+  creationTimestamp: null
+  labels:
+    longhorn-manager: ""
+  name: objectstores.longhorn.io
+spec:
+  group: longhorn.io
+  names:
+    kind: ObjectStore
+    listKind: ObjectStoreList
+    plural: objectstores
+    shortNames:
+    - lhos
+    singular: objectstore
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: The state of object store
+      jsonPath: .status.state
+      name: State
+      type: string
+    - description: Endpoint addresses
+      jsonPath: .status.endpoints[*]
+      name: Endpoints
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta2
+    schema:
+      openAPIV3Schema:
+        description: Representation of an object storage endpoint in the K8s API.
+        properties:
+          apiVersion:
+            description: 'APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+            type: string
+          kind:
+            description: 'Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              credentials:
+                description: "Credentials contain a pair of access and secret keys that are used to seed the object store. \n This expects an opaque secret with the two keys `RGW_DEFAULT_USER_ACCESS_KEY` and `RGW_DEFAULT_USER_SECRET_KEY` to be provided by the user in the longhorn-system namespace."
+                properties:
+                  name:
+                    description: name is unique within a namespace to reference a secret resource.
+                    type: string
+                  namespace:
+                    description: namespace defines the space within which the secret name must be unique.
+                    type: string
+                type: object
+              endpoints:
+                description: A list of endpoint configurations to make the object store available at.
+                items:
+                  properties:
+                    domainName:
+                      type: string
+                    name:
+                      type: string
+                    tls:
+                      description: Reference to a secret containing TLS certificate and key for DomainName
+                      properties:
+                        name:
+                          description: name is unique within a namespace to reference a secret resource.
+                          type: string
+                        namespace:
+                          description: namespace defines the space within which the secret name must be unique.
+                          type: string
+                      type: object
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              image:
+                description: Desired images for the gateway and UI containers.
+                type: string
+              size:
+                anyOf:
+                - type: integer
+                - type: string
+                description: The initial size of the volume to provision. The volume will be created such that it can be expanded if resources are available
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+              targetState:
+                default: running
+                description: A target state. Can be used to volutarily stop the gateway for offline volume operations
+                enum:
+                - running
+                - stopped
+                type: string
+              uiImage:
+                type: string
+              volumeParameters:
+                description: The configuration of the longhorn volume providing storage for the object store.
+                properties:
+                  backendStoreDriver:
+                    enum:
+                    - v1
+                    - v2
+                    type: string
+                  dataLocality:
+                    enum:
+                    - disabled
+                    - best-effort
+                    - strict-local
+                    type: string
+                  diskSelector:
+                    items:
+                      type: string
+                    type: array
+                  fromBackup:
+                    type: string
+                  nodeSelector:
+                    items:
+                      type: string
+                    type: array
+                  numberOfReplicas:
+                    default: 3
+                    minimum: 1
+                    type: integer
+                  recurringJobSelector:
+                    items:
+                      properties:
+                        isGroup:
+                          type: boolean
+                        name:
+                          type: string
+                      required:
+                      - isGroup
+                      - name
+                      type: object
+                    type: array
+                  replicaAutoBalance:
+                    enum:
+                    - ignored
+                    - disabled
+                    - least-effort
+                    - best-effort
+                    type: string
+                  replicaDiskSoftAntiAffinity:
+                    description: Replica disk soft anti affinity of the volume. Set enabled to allow replicas to be scheduled in the same disk.
+                    enum:
+                    - ignored
+                    - enabled
+                    - disabled
+                    type: string
+                  replicaSoftAntiAffinity:
+                    description: Replica soft anti affinity of the volume. Set enabled to allow replicas to be scheduled on the same node
+                    enum:
+                    - ignored
+                    - enabled
+                    - disabled
+                    type: string
+                  replicaZoneSoftAntiAffinity:
+                    description: Replica zone soft anti affinity of the volume. Set enabled to allow replicas to be scheduled in the same zone
+                    enum:
+                    - ignored
+                    - enabled
+                    - disabled
+                    type: string
+                  revisionCounterDisabled:
+                    type: boolean
+                  staleReplicaTimeout:
+                    default: 2880
+                    minimum: 1
+                    type: integer
+                  unmapMarkSnapChainRemoved:
+                    enum:
+                    - ignored
+                    - disabled
+                    - enabled
+                    type: string
+                type: object
+            type: object
+          status:
+            properties:
+              endpoints:
+                description: A list of addresses where the S3 store is exposed.
+                items:
+                  type: string
+                type: array
+              state:
+                description: "The state of the object store as observed by the object store controller. \n The object store implements a state machine with this, beginning at \"unknown\". Once the object store controller detects the new object store and begins resource creation the state is transformed to \"starting\". The object store controller observes the resources and once all resources are up and ready the state transitions to \"running\". The state remains in \"running\" until the object store is deleted, at which point the controller will clean up the associated resources. \n  │ object store created  │  └──►┌─────────────┐      │ unknown     │  ┌── └─────────────┘  │  │ controller creates resources  │  └──►┌─────────────┐      │ starting    │◄─────────────────────────────┐  ┌── └─────────────┘                              │  │                                                │  │ controller detects all resources ready         │ target state  │                                                │ is set to `running`  └──►┌─────────────┐                              │      │ running     │                              │  ┌── └─────────────┘                              │  │     │                                          │  │     │ target state is set to `stopped`         │  │     │                                          │  │     └──►┌─────────────┐                        │  │         │ stopping    │                        │  │     ┌── └─────────────┘                        │  │     │                                          │  │     │ deployment is scaled down and volume     │  │     │ is detached                              │  │     │                                          │  │     └──►┌─────────────┐                        │  │         │ stopped     │                        │  │         └─────────────┘────────────────────────┘  │  │ object endpoint is marked for deletion  │  └──►┌─────────────┐      │ terminating │  ┌── └─────────────┘  │  │ controller waits for dependent resources to disappear before removing  │ the finalizer, thereby letting the object store be deleted \n The \"stopped\" state is used in cases where a user may need to stop the s3gw workload on the volume but wants to restart it with the same configuration and data afterwards. E.g. maintenance work, moving the longhorn volume to a new instance manager etc. \n Any state can transition to the \"error\" state. At which point probably user intervention is necessary to recover."
+                enum:
+                - unknown
+                - starting
+                - running
+                - stopping
+                - stopped
+                - terminating
+                - error
                 type: string
             type: object
         type: object
@@ -2427,14 +2648,19 @@ spec:
               diskPath:
                 type: string
               engineImage:
+                description: 'Deprecated: Replaced by field `image`.'
                 type: string
               engineName:
                 type: string
+              evictionRequested:
+                type: boolean
               failedAt:
                 type: string
               hardNodeAffinity:
                 type: string
               healthyAt:
+                type: string
+              image:
                 type: string
               logRequested:
                 type: boolean
@@ -2486,6 +2712,7 @@ spec:
               currentState:
                 type: string
               evictionRequested:
+                description: 'Deprecated: Replaced by field `spec.evictionRequested`.'
                 type: boolean
               instanceManagerName:
                 type: string
@@ -3464,6 +3691,7 @@ spec:
               encrypted:
                 type: boolean
               engineImage:
+                description: 'Deprecated: Replaced by field `image`.'
                 type: string
               fromBackup:
                 type: string
@@ -3473,6 +3701,8 @@ spec:
                 - iscsi
                 - nvmf
                 - ""
+                type: string
+              image:
                 type: string
               lastAttachedBy:
                 type: string
@@ -3502,15 +3732,22 @@ spec:
                 - least-effort
                 - best-effort
                 type: string
+              replicaDiskSoftAntiAffinity:
+                description: Replica disk soft anti affinity of the volume. Set enabled to allow replicas to be scheduled in the same disk.
+                enum:
+                - ignored
+                - enabled
+                - disabled
+                type: string
               replicaSoftAntiAffinity:
-                description: Replica soft anti affinity of the volume. Set enabled to allow replicas to be scheduled on the same node
+                description: Replica soft anti affinity of the volume. Set enabled to allow replicas to be scheduled on the same node.
                 enum:
                 - ignored
                 - enabled
                 - disabled
                 type: string
               replicaZoneSoftAntiAffinity:
-                description: Replica zone soft anti affinity of the volume. Set enabled to allow replicas to be scheduled in the same zone
+                description: Replica zone soft anti affinity of the volume. Set enabled to allow replicas to be scheduled in the same zone.
                 enum:
                 - ignored
                 - enabled

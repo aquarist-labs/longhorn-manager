@@ -9,22 +9,24 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	clientset "k8s.io/client-go/kubernetes"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/controller"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
+
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/engineapi"
-	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	"github.com/longhorn/longhorn-manager/types"
 	"github.com/longhorn/longhorn-manager/util"
+
+	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 )
 
 type OrphanController struct {
@@ -67,7 +69,7 @@ func NewOrphanController(
 		ds: ds,
 
 		kubeClient:    kubeClient,
-		eventRecorder: eventBroadcaster.NewRecorder(scheme, v1.EventSource{Component: "longhorn-orphan-controller"}),
+		eventRecorder: eventBroadcaster.NewRecorder(scheme, corev1.EventSource{Component: "longhorn-orphan-controller"}),
 	}
 
 	ds.OrphanInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -163,16 +165,14 @@ func (oc *OrphanController) handleErr(err error, key interface{}) {
 	}
 
 	log := oc.logger.WithField("orphan", key)
-
 	if oc.queue.NumRequeues(key) < maxRetries {
-		log.WithError(err).Errorf("Failed to sync Longhorn orphan %v: %v", key, err)
-
+		handleReconcileErrorLogging(log, err, "Failed to sync Longhorn orphan")
 		oc.queue.AddRateLimited(key)
 		return
 	}
 
 	utilruntime.HandleError(err)
-	log.WithError(err).Errorf("Dropping Longhorn orphan %v out of the queue: %v", key, err)
+	handleReconcileErrorLogging(log, err, "Dropping Longhorn orphan out of the queue")
 	oc.queue.Forget(key)
 }
 
@@ -330,7 +330,7 @@ func (oc *OrphanController) DeleteSpdkReplicaInstance(diskName, diskUUID, replic
 		err = errors.Wrapf(err, "cannot delete SPDK replica instance %v", replicaInstanceName)
 	}()
 
-	im, err := oc.ds.GetDefaultInstanceManagerByNode(oc.controllerID)
+	im, err := oc.ds.GetDefaultInstanceManagerByNodeRO(oc.controllerID)
 	if err != nil {
 		return errors.Wrapf(err, "failed to get instance manager for node %v for deleting SPDK replica instance  %v", oc.controllerID, replicaInstanceName)
 	}

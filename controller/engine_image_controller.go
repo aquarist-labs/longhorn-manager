@@ -10,20 +10,21 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	appsv1 "k8s.io/api/apps/v1"
-	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	clientset "k8s.io/client-go/kubernetes"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/controller"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/engineapi"
@@ -81,7 +82,7 @@ func NewEngineImageController(
 		serviceAccount: serviceAccount,
 
 		kubeClient:    kubeClient,
-		eventRecorder: eventBroadcaster.NewRecorder(scheme, v1.EventSource{Component: "longhorn-engine-image-controller"}),
+		eventRecorder: eventBroadcaster.NewRecorder(scheme, corev1.EventSource{Component: "longhorn-engine-image-controller"}),
 
 		ds: ds,
 
@@ -159,13 +160,13 @@ func (ic *EngineImageController) handleErr(err error, key interface{}) {
 
 	log := ic.logger.WithField("engineImage", key)
 	if ic.queue.NumRequeues(key) < maxRetries {
-		log.WithError(err).Error("Failed to sync Longhorn engine image")
+		handleReconcileErrorLogging(log, err, "Failed to sync Longhorn engine image")
 		ic.queue.AddRateLimited(key)
 		return
 	}
 
 	utilruntime.HandleError(err)
-	log.WithError(err).Error("Dropping Longhorn engine image out of the queue")
+	handleReconcileErrorLogging(log, err, "Dropping Longhorn engine image out of the queue")
 	ic.queue.Forget(key)
 }
 
@@ -258,13 +259,13 @@ func (ic *EngineImageController) syncEngineImage(key string) (err error) {
 			return err
 		}
 
-		priorityClassSetting, err := ic.ds.GetSetting(types.SettingNamePriorityClass)
+		priorityClassSetting, err := ic.ds.GetSettingWithAutoFillingRO(types.SettingNamePriorityClass)
 		if err != nil {
 			return errors.Wrapf(err, "failed to get priority class setting before creating engine image daemonset")
 		}
 		priorityClass := priorityClassSetting.Value
 
-		registrySecretSetting, err := ic.ds.GetSetting(types.SettingNameRegistrySecret)
+		registrySecretSetting, err := ic.ds.GetSettingWithAutoFillingRO(types.SettingNameRegistrySecret)
 		if err != nil {
 			return errors.Wrapf(err, "failed to get registry secret setting before creating engine image daemonset")
 		}
@@ -336,7 +337,7 @@ func (ic *EngineImageController) syncEngineImage(key string) (err error) {
 		}
 	}
 
-	readyNodes, err := ic.ds.ListReadyNodes()
+	readyNodes, err := ic.ds.ListReadyNodesRO()
 	if err != nil {
 		return err
 	}
@@ -349,7 +350,7 @@ func (ic *EngineImageController) syncEngineImage(key string) (err error) {
 		engineImage.Status.Conditions = types.SetConditionAndRecord(engineImage.Status.Conditions,
 			longhorn.EngineImageConditionTypeReady, longhorn.ConditionStatusTrue,
 			"", fmt.Sprintf("Engine image %v (%v) is fully deployed on all ready nodes", engineImage.Name, engineImage.Spec.Image),
-			ic.eventRecorder, engineImage, v1.EventTypeNormal)
+			ic.eventRecorder, engineImage, corev1.EventTypeNormal)
 		engineImage.Status.State = longhorn.EngineImageStateDeployed
 	}
 
@@ -368,8 +369,8 @@ func (ic *EngineImageController) syncNodeDeploymentMap(engineImage *longhorn.Eng
 	// initialize deployment map for all known nodes
 	nodeDeploymentMap, err := func() (map[string]bool, error) {
 		deployed := map[string]bool{}
-		nodesRO, err := ic.ds.ListNodesRO()
-		for _, node := range nodesRO {
+		nodes, err := ic.ds.ListNodesRO()
+		for _, node := range nodes {
 			deployed[node.Name] = false
 		}
 		return deployed, err
@@ -433,9 +434,9 @@ func (ic *EngineImageController) handleAutoUpgradeEngineImageToDefaultEngineImag
 
 	for _, vs := range limitedCandidates {
 		for _, v := range vs {
-			ic.logger.WithFields(logrus.Fields{"volume": v.Name, "engineImage": v.Spec.EngineImage}).Infof("Upgrading volume engine image to the default engine image %v automatically", defaultEngineImage)
-			v.Spec.EngineImage = defaultEngineImage
-			v, err = ic.ds.UpdateVolume(v)
+			ic.logger.WithFields(logrus.Fields{"volume": v.Name, "image": v.Spec.Image}).Infof("Upgrading volume engine image to the default engine image %v automatically", defaultEngineImage)
+			v.Spec.Image = defaultEngineImage
+			_, err = ic.ds.UpdateVolume(v)
 			if err != nil {
 				return err
 			}
@@ -474,14 +475,14 @@ func (ic *EngineImageController) getVolumesForEngineImageUpgrading(volumes map[s
 	inProgress = make(map[string][]*longhorn.Volume)
 
 	for _, v := range volumes {
-		if v.Spec.EngineImage != v.Status.CurrentImage {
+		if v.Spec.Image != v.Status.CurrentImage {
 			inProgress[v.Status.OwnerID] = append(inProgress[v.Status.OwnerID], v)
 			continue
 		}
 		canBeUpgraded := ic.canDoOfflineEngineImageUpgrade(v, newEngineImageResource) || ic.canDoLiveEngineImageUpgrade(v, newEngineImageResource)
 		isCurrentEIAvailable, _ := ic.ds.CheckEngineImageReadyOnAllVolumeReplicas(v.Status.CurrentImage, v.Name, v.Status.CurrentNodeID)
 		isNewEIAvailable, _ := ic.ds.CheckEngineImageReadyOnAllVolumeReplicas(newEngineImageResource.Spec.Image, v.Name, v.Status.CurrentNodeID)
-		validCandidate := v.Spec.EngineImage != newEngineImageResource.Spec.Image && canBeUpgraded && isCurrentEIAvailable && isNewEIAvailable
+		validCandidate := v.Spec.Image != newEngineImageResource.Spec.Image && canBeUpgraded && isCurrentEIAvailable && isNewEIAvailable
 		if validCandidate {
 			candidates[v.Status.OwnerID] = append(candidates[v.Status.OwnerID], v)
 		}
@@ -554,7 +555,7 @@ func (ic *EngineImageController) countVolumesUsingEngineImage(image string) (int
 
 	count := 0
 	for _, v := range volumes {
-		if v.Spec.EngineImage == image || v.Status.CurrentImage == image {
+		if v.Spec.Image == image || v.Status.CurrentImage == image {
 			count++
 		}
 	}
@@ -569,7 +570,7 @@ func (ic *EngineImageController) countEnginesUsingEngineImage(image string) (int
 
 	count := 0
 	for _, e := range engines {
-		if e.Spec.EngineImage == image || e.Status.CurrentImage == image {
+		if e.Spec.Image == image || e.Status.CurrentImage == image {
 			count++
 		}
 	}
@@ -584,7 +585,7 @@ func (ic *EngineImageController) countReplicasUsingEngineImage(image string) (in
 
 	count := 0
 	for _, r := range replicas {
-		if r.Spec.EngineImage == image || r.Status.CurrentImage == image {
+		if r.Spec.Image == image || r.Status.CurrentImage == image {
 			count++
 		}
 	}
@@ -645,15 +646,12 @@ func (ic *EngineImageController) cleanupExpiredEngineImage(ei *longhorn.EngineIm
 		return nil
 	}
 	if util.TimestampAfterTimeout(ei.Status.NoRefSince, ExpiredEngineImageTimeout) {
-		defaultEngineImage, err := ic.ds.GetSetting(types.SettingNameDefaultEngineImage)
+		defaultEngineImageValue, err := ic.ds.GetSettingValueExisted(types.SettingNameDefaultEngineImage)
 		if err != nil {
 			return err
 		}
-		if defaultEngineImage.Value == "" {
-			return fmt.Errorf("default engine image not set")
-		}
 		// Don't delete the default image
-		if ei.Spec.Image == defaultEngineImage.Value {
+		if ei.Spec.Image == defaultEngineImageValue {
 			return nil
 		}
 
@@ -697,8 +695,8 @@ func (ic *EngineImageController) enqueueVolumes(volumes ...interface{}) {
 			}
 		}
 
-		if _, ok := images[v.Spec.EngineImage]; !ok {
-			images[v.Spec.EngineImage] = struct{}{}
+		if _, ok := images[v.Spec.Image]; !ok {
+			images[v.Spec.Image] = struct{}{}
 		}
 		if v.Status.CurrentImage != "" {
 			if _, ok := images[v.Status.CurrentImage]; !ok {
@@ -754,8 +752,8 @@ func (ic *EngineImageController) ResolveRefAndEnqueue(namespace string, ref *met
 	ic.enqueueEngineImage(engineImage)
 }
 
-func (ic *EngineImageController) createEngineImageDaemonSetSpec(ei *longhorn.EngineImage, tolerations []v1.Toleration,
-	priorityClass, registrySecret string, imagePullPolicy v1.PullPolicy, nodeSelector map[string]string) (*appsv1.DaemonSet, error) {
+func (ic *EngineImageController) createEngineImageDaemonSetSpec(ei *longhorn.EngineImage, tolerations []corev1.Toleration,
+	priorityClass, registrySecret string, imagePullPolicy corev1.PullPolicy, nodeSelector map[string]string) (*appsv1.DaemonSet, error) {
 
 	dsName := types.GetDaemonSetNameFromEngineImageName(ei.Name)
 	image := ei.Spec.Image
@@ -790,33 +788,33 @@ func (ic *EngineImageController) createEngineImageDaemonSetSpec(ei *longhorn.Eng
 					MaxUnavailable: &maxUnavailable,
 				},
 			},
-			Template: v1.PodTemplateSpec{
+			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:            dsName,
 					Labels:          types.GetEIDaemonSetLabelSelector(ei.Name),
 					OwnerReferences: datastore.GetOwnerReferencesForEngineImage(ei),
 				},
-				Spec: v1.PodSpec{
+				Spec: corev1.PodSpec{
 					ServiceAccountName: ic.serviceAccount,
 					Tolerations:        tolerations,
 					NodeSelector:       nodeSelector,
 					PriorityClassName:  priorityClass,
-					Containers: []v1.Container{
+					Containers: []corev1.Container{
 						{
 							Name:            dsName,
 							Image:           image,
 							Command:         cmd,
 							Args:            args,
 							ImagePullPolicy: imagePullPolicy,
-							VolumeMounts: []v1.VolumeMount{
+							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "data",
 									MountPath: "/data/",
 								},
 							},
-							ReadinessProbe: &v1.Probe{
-								ProbeHandler: v1.ProbeHandler{
-									Exec: &v1.ExecAction{
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									Exec: &corev1.ExecAction{
 										Command: []string{
 											"sh", "-c",
 											"ls /data/longhorn && /data/longhorn version --client-only",
@@ -828,9 +826,9 @@ func (ic *EngineImageController) createEngineImageDaemonSetSpec(ei *longhorn.Eng
 								PeriodSeconds:       datastore.PodProbePeriodSeconds,
 								FailureThreshold:    datastore.PodLivenessProbeFailureThreshold,
 							},
-							LivenessProbe: &v1.Probe{
-								ProbeHandler: v1.ProbeHandler{
-									Exec: &v1.ExecAction{
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									Exec: &corev1.ExecAction{
 										Command: []string{
 											"sh", "-c",
 											"/data/longhorn version --client-only",
@@ -842,16 +840,16 @@ func (ic *EngineImageController) createEngineImageDaemonSetSpec(ei *longhorn.Eng
 								PeriodSeconds:       datastore.PodProbePeriodSeconds,
 								FailureThreshold:    datastore.PodLivenessProbeFailureThreshold,
 							},
-							SecurityContext: &v1.SecurityContext{
+							SecurityContext: &corev1.SecurityContext{
 								Privileged: &privileged,
 							},
 						},
 					},
-					Volumes: []v1.Volume{
+					Volumes: []corev1.Volume{
 						{
 							Name: "data",
-							VolumeSource: v1.VolumeSource{
-								HostPath: &v1.HostPathVolumeSource{
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
 									Path: types.GetEngineBinaryDirectoryOnHostForImage(image),
 								},
 							},
@@ -863,12 +861,13 @@ func (ic *EngineImageController) createEngineImageDaemonSetSpec(ei *longhorn.Eng
 	}
 
 	if registrySecret != "" {
-		d.Spec.Template.Spec.ImagePullSecrets = []v1.LocalObjectReference{
+		d.Spec.Template.Spec.ImagePullSecrets = []corev1.LocalObjectReference{
 			{
 				Name: registrySecret,
 			},
 		}
 	}
+	types.AddGoCoverDirToDaemonSet(d)
 
 	return d, nil
 }
@@ -879,7 +878,7 @@ func (ic *EngineImageController) isResponsibleFor(ei *longhorn.EngineImage) (boo
 		err = errors.Wrap(err, "error while checking isResponsibleFor")
 	}()
 
-	readyNodesWithDefaultEI, err := ic.ds.ListReadyNodesWithEngineImage(ei.Spec.Image)
+	readyNodesWithDefaultEI, err := ic.ds.ListReadyNodesContainingEngineImageRO(ei.Spec.Image)
 	if err != nil {
 		return false, err
 	}

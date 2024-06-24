@@ -5,12 +5,14 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 type BackupState string
 
 const (
+	// non-final state
 	BackupStateNew        = BackupState("")
 	BackupStatePending    = BackupState("Pending")
 	BackupStateInProgress = BackupState("InProgress")
-	BackupStateCompleted  = BackupState("Completed")
-	BackupStateError      = BackupState("Error")
-	BackupStateUnknown    = BackupState("Unknown")
+	// final state
+	BackupStateCompleted = BackupState("Completed")
+	BackupStateError     = BackupState("Error")
+	BackupStateUnknown   = BackupState("Unknown")
 )
 
 type BackupCompressionMethod string
@@ -95,6 +97,14 @@ type BackupStatus struct {
 	// Compression method
 	// +optional
 	CompressionMethod BackupCompressionMethod `json:"compressionMethod"`
+	// +optional
+	ObjectStoreBackup string `json:"objectStoreBackup,omitempty"`
+}
+
+type ObjectStoreBackup struct {
+	Labels      map[string]string `json:"labels,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
+	Spec        ObjectStoreSpec   `json:"spec,omitempty"`
 }
 
 // +genclient

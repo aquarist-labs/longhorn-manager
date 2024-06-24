@@ -11,12 +11,15 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/longhorn/backupstore"
+
+	btypes "github.com/longhorn/backupstore/types"
 	etypes "github.com/longhorn/longhorn-engine/pkg/types"
 
 	"github.com/longhorn/longhorn-manager/datastore"
-	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	"github.com/longhorn/longhorn-manager/types"
 	"github.com/longhorn/longhorn-manager/util"
+
+	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 )
 
 const (
@@ -184,8 +187,8 @@ func parseBackupNamesList(output, volumeName string) ([]string, error) {
 	}
 
 	backupNames := []string{}
-	if volumeData.Messages[string(backupstore.MessageTypeError)] != "" {
-		return backupNames, errors.New(volumeData.Messages[string(backupstore.MessageTypeError)])
+	if volumeData.Messages[string(btypes.MessageTypeError)] != "" {
+		return backupNames, errors.New(volumeData.Messages[string(btypes.MessageTypeError)])
 	}
 	for backupName := range volumeData.Backups {
 		backupNames = append(backupNames, backupName)
@@ -310,18 +313,18 @@ func (btc *BackupTargetClient) BackupCleanUpAllMounts() (err error) {
 // SnapshotBackup calls engine binary
 // TODO: Deprecated, replaced by gRPC proxy
 func (e *EngineBinary) SnapshotBackup(engine *longhorn.Engine, snapName, backupName, backupTarget,
-	backingImageName, backingImageChecksum, compressionMethod string, concurrentLimit int, storageClassName string,
-	labels, credential map[string]string) (string, string, error) {
+	backingImageName, backingImageChecksum, compressionMethod string, concurrentLimit int, storageClassName,
+	objectStoreBackup string, labels, credential map[string]string) (string, string, error) {
 	if snapName == etypes.VolumeHeadName {
 		return "", "", fmt.Errorf("invalid operation: cannot backup %v", etypes.VolumeHeadName)
 	}
 	// TODO: update when replacing this function
 	snap, err := e.SnapshotGet(nil, snapName)
 	if err != nil {
-		return "", "", errors.Wrapf(err, "error getting snapshot '%s', volume '%s'", snapName, e.name)
+		return "", "", errors.Wrapf(err, "error getting snapshot '%s', volume '%s'", snapName, e.volumeName)
 	}
 	if snap == nil {
-		return "", "", errors.Errorf("could not find snapshot '%s' to backup, volume '%s'", snapName, e.name)
+		return "", "", errors.Errorf("could not find snapshot '%s' to backup, volume '%s'", snapName, e.volumeName)
 	}
 	version, err := e.VersionGet(nil, true)
 	if err != nil {
@@ -365,10 +368,22 @@ func (e *EngineBinary) SnapshotBackup(engine *longhorn.Engine, snapName, backupN
 
 // SnapshotBackupStatus calls engine binary
 // TODO: Deprecated, replaced by gRPC proxy
-func (e *EngineBinary) SnapshotBackupStatus(engine *longhorn.Engine, backupName, replicaAddress string) (*longhorn.EngineBackupStatus, error) {
+func (e *EngineBinary) SnapshotBackupStatus(engine *longhorn.Engine, backupName, replicaAddress,
+	replicaName string) (*longhorn.EngineBackupStatus, error) {
 	args := []string{"backup", "status", backupName}
 	if replicaAddress != "" {
 		args = append(args, "--replica", replicaAddress)
+	}
+
+	// For now, we likely don't know the replica name here. Don't bother checking the binary version if we don't.
+	if replicaName != "" {
+		version, err := e.VersionGet(engine, true)
+		if err != nil {
+			return nil, err
+		}
+		if version.ClientVersion.CLIAPIVersion >= 9 {
+			args = append(args, "--replica-instance-name", replicaName)
+		}
 	}
 
 	output, err := e.ExecuteEngineBinary(args...)
@@ -443,4 +458,10 @@ func (e *EngineBinary) BackupRestoreStatus(*longhorn.Engine) (map[string]*longho
 		return nil, err
 	}
 	return replicaStatusMap, nil
+}
+
+// CleanupBackupMountPoints calls engine binary
+// TODO: Deprecated, replaced by gRPC proxy, just to match the interface
+func (e *EngineBinary) CleanupBackupMountPoints() error {
+	return fmt.Errorf(ErrNotImplement)
 }

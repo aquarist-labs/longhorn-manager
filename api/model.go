@@ -5,9 +5,12 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/sirupsen/logrus"
+
 	"github.com/rancher/go-rancher/api"
 	"github.com/rancher/go-rancher/client"
-	"github.com/sirupsen/logrus"
+
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/longhorn/longhorn-manager/controller"
 	"github.com/longhorn/longhorn-manager/datastore"
@@ -15,7 +18,6 @@ import (
 	"github.com/longhorn/longhorn-manager/manager"
 	"github.com/longhorn/longhorn-manager/types"
 	"github.com/longhorn/longhorn-manager/util"
-	v1 "k8s.io/api/core/v1"
 
 	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 )
@@ -38,7 +40,7 @@ type Volume struct {
 	StaleReplicaTimeout              int                                    `json:"staleReplicaTimeout"`
 	State                            longhorn.VolumeState                   `json:"state"`
 	Robustness                       longhorn.VolumeRobustness              `json:"robustness"`
-	EngineImage                      string                                 `json:"engineImage"`
+	Image                            string                                 `json:"image"`
 	CurrentImage                     string                                 `json:"currentImage"`
 	BackingImage                     string                                 `json:"backingImage"`
 	Created                          string                                 `json:"created"`
@@ -54,6 +56,7 @@ type Volume struct {
 	BackupCompressionMethod          longhorn.BackupCompressionMethod       `json:"backupCompressionMethod"`
 	ReplicaSoftAntiAffinity          longhorn.ReplicaSoftAntiAffinity       `json:"replicaSoftAntiAffinity"`
 	ReplicaZoneSoftAntiAffinity      longhorn.ReplicaZoneSoftAntiAffinity   `json:"replicaZoneSoftAntiAffinity"`
+	ReplicaDiskSoftAntiAffinity      longhorn.ReplicaDiskSoftAntiAffinity   `json:"replicaDiskSoftAntiAffinity"`
 	BackendStoreDriver               longhorn.BackendStoreDriverType        `json:"backendStoreDriver"`
 	OfflineReplicaRebuilding         longhorn.OfflineReplicaRebuilding      `json:"offlineReplicaRebuilding"`
 	OfflineReplicaRebuildingRequired bool                                   `json:"offlineReplicaRebuildingRequired"`
@@ -170,7 +173,7 @@ type Instance struct {
 	NodeID              string `json:"hostId"`
 	Address             string `json:"address"`
 	Running             bool   `json:"running"`
-	EngineImage         string `json:"engineImage"`
+	Image               string `json:"image"`
 	CurrentImage        string `json:"currentImage"`
 	InstanceManagerName string `json:"instanceManagerName"`
 }
@@ -323,6 +326,10 @@ type UpdateReplicaZoneSoftAntiAffinityInput struct {
 	ReplicaZoneSoftAntiAffinity string `json:"replicaZoneSoftAntiAffinity"`
 }
 
+type UpdateReplicaDiskSoftAntiAffinityInput struct {
+	ReplicaDiskSoftAntiAffinity string `json:"replicaDiskSoftAntiAffinity"`
+}
+
 type PVCreateInput struct {
 	PVName string `json:"pvName"`
 	FSType string `json:"fsType"`
@@ -358,6 +365,7 @@ type Node struct {
 	Region                    string                        `json:"region"`
 	Zone                      string                        `json:"zone"`
 	InstanceManagerCPURequest int                           `json:"instanceManagerCPURequest"`
+	AutoEvicting              bool                          `json:"autoEvicting"`
 }
 
 type DiskStatus struct {
@@ -382,8 +390,8 @@ type DiskUpdateInput struct {
 
 type Event struct {
 	client.Resource
-	Event     v1.Event `json:"event"`
-	EventType string   `json:"eventType"`
+	Event     corev1.Event `json:"event"`
+	EventType string       `json:"eventType"`
 }
 
 type SupportBundle struct {
@@ -531,6 +539,62 @@ type SnapshotCRListOutput struct {
 	Type string       `json:"type"`
 }
 
+type ObjectStore struct {
+	client.Resource
+	Name       string                    `json:"name"`
+	State      longhorn.ObjectStoreState `json:"state"`
+	Endpoints  []string                  `json:"endpoints"`
+	Size       int64                     `json:"size"`       // number of bytes allocated
+	ActualSize int64                     `json:"actualSize"` // number of bytes occupied
+	Image      string                    `json:"image"`
+	UIImage    string                    `json:"uiImage"`
+}
+
+type ObjectStoreInput struct {
+	Name string `json:"name"`
+	Size string `json:"size"`
+
+	AccessKey string `json:"accesskey"`
+	SecretKey string `json:"secretkey"`
+
+	Endpoints []ObjectEndpointInput `json:"endpoints"`
+
+	NumberOfReplicas            int                                  `json:"numberOfReplicas"`
+	ReplicaSoftAntiAffinity     longhorn.ReplicaSoftAntiAffinity     `json:"replicaSoftAntiAffinity"`
+	ReplicaZoneSoftAntiAffinity longhorn.ReplicaZoneSoftAntiAffinity `json:"replicaZoneSoftAntiAffinity"`
+	ReplicaDiskSoftAntiAffinity longhorn.ReplicaDiskSoftAntiAffinity `json:"replicaDiskSoftAntiAffinity"`
+	DiskSelector                []string                             `json:"diskSelector"`
+	NodeSelector                []string                             `json:"nodeSelector"`
+	DataLocality                longhorn.DataLocality                `json:"dataLocality"`
+	FromBackup                  string                               `json:"fromBackup"`
+	StaleReplicaTimeout         int                                  `json:"staleReplicaTimeout"`
+	RecurringJobSelector        []longhorn.VolumeRecurringJob        `json:"recurringJobSelector"`
+	ReplicaAutoBalance          longhorn.ReplicaAutoBalance          `json:"replicaAutoBalance"`
+	RevisionCounterDisabled     bool                                 `json:"revisionCounterDisabled"`
+	UnmapMarkSnapChainRemoved   longhorn.UnmapMarkSnapChainRemoved   `json:"unmapMarkSnapChainRemoved"`
+	BackendStoreDriver          longhorn.BackendStoreDriverType      `json:"backendStoreDriver"`
+	TargetState                 longhorn.ObjectStoreState            `json:"targetState"`
+	Image                       string                               `json:"image"`
+	UIImage                     string                               `json:"uiImage"`
+}
+
+type ObjectEndpointInput struct {
+	DomainName      string `json:"domainName"`
+	SecretName      string `json:"secretName"`
+	SecretNamespace string `json:"secretNamespace"`
+}
+
+type ObjectStoreListOutput struct {
+	Data []ObjectStore `json:"data"`
+	Type string        `json:"type"`
+}
+
+type SecretRef struct {
+	client.Resource
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+}
+
 func NewSchema() *client.Schemas {
 	schemas := &client.Schemas{}
 
@@ -567,6 +631,7 @@ func NewSchema() *client.Schemas {
 	schemas.AddType("UpdateUnmapMarkSnapChainRemovedInput", UpdateUnmapMarkSnapChainRemovedInput{})
 	schemas.AddType("UpdateReplicaSoftAntiAffinityInput", UpdateReplicaSoftAntiAffinityInput{})
 	schemas.AddType("UpdateReplicaZoneSoftAntiAffinityInput", UpdateReplicaZoneSoftAntiAffinityInput{})
+	schemas.AddType("UpdateReplicaDiskSoftAntiAffinityInput", UpdateReplicaDiskSoftAntiAffinityInput{})
 	schemas.AddType("workloadStatus", longhorn.WorkloadStatus{})
 	schemas.AddType("cloneStatus", longhorn.VolumeCloneStatus{})
 	schemas.AddType("empty", Empty{})
@@ -615,6 +680,9 @@ func NewSchema() *client.Schemas {
 	systemBackupSchema(schemas.AddType("systemBackup", SystemBackup{}))
 	systemRestoreSchema(schemas.AddType("systemRestore", SystemRestore{}))
 	snapshotCRListOutputSchema(schemas.AddType("snapshotCRListOutput", SnapshotCRListOutput{}))
+
+	objectStoreSchema(schemas.AddType("objectStore", ObjectStore{}))
+	secretRefSchema(schemas.AddType("secretRef", SecretRef{}))
 
 	return schemas
 }
@@ -927,6 +995,10 @@ func volumeSchema(volume *client.Schema) {
 			Input: "UpdateReplicaZoneSoftAntiAffinityInput",
 		},
 
+		"updateReplicaDiskSoftAntiAffinity": {
+			Input: "UpdateReplicaDiskSoftAntiAffinityInput",
+		},
+
 		"pvCreate": {
 			Input:  "PVCreateInput",
 			Output: "volume",
@@ -1055,6 +1127,12 @@ func volumeSchema(volume *client.Schema) {
 	replicaZoneSoftAntiAffinity.Default = longhorn.ReplicaZoneSoftAntiAffinityDefault
 	volume.ResourceFields["replicaZoneSoftAntiAffinity"] = replicaZoneSoftAntiAffinity
 
+	replicaDiskSoftAntiAffinity := volume.ResourceFields["replicaDiskSoftAntiAffinity"]
+	replicaDiskSoftAntiAffinity.Required = true
+	replicaDiskSoftAntiAffinity.Create = true
+	replicaDiskSoftAntiAffinity.Default = longhorn.ReplicaDiskSoftAntiAffinityDefault
+	volume.ResourceFields["replicaDiskSoftAntiAffinity"] = replicaDiskSoftAntiAffinity
+
 	backendStoreDriver := volume.ResourceFields["backendStoreDriver"]
 	backendStoreDriver.Required = true
 	backendStoreDriver.Create = true
@@ -1171,6 +1249,37 @@ func volumeAttachmentSchema(volumeAttachment *client.Schema) {
 	volumeAttachment.ResourceFields["attachments"] = attachments
 }
 
+func objectStoreSchema(objectStore *client.Schema) {
+	objectStore.CollectionMethods = []string{"GET", "POST"}
+	objectStore.ResourceMethods = []string{"GET", "PUT", "DELETE"}
+
+	name := objectStore.ResourceFields["name"]
+	name.Required = true
+	name.Unique = true
+	name.Create = true
+	objectStore.ResourceFields["name"] = name
+}
+
+func secretRefSchema(secretRef *client.Schema) {
+	secretRef.CollectionMethods = []string{"GET"}
+
+	name := secretRef.ResourceFields["name"]
+	name.Required = true
+	name.Unique = true
+	name.Create = true
+	secretRef.ResourceFields["name"] = name
+}
+
+func storageClassSchema(storageClass *client.Schema) {
+	storageClass.CollectionMethods = []string{"GET"}
+
+	name := storageClass.ResourceFields["name"]
+	name.Required = true
+	name.Unique = true
+	name.Create = true
+	storageClass.ResourceFields["name"] = name
+}
+
 func toEmptyResource() *Empty {
 	return &Empty{
 		Resource: client.Resource{
@@ -1231,7 +1340,7 @@ func toVolumeResource(v *longhorn.Volume, ves []*longhorn.Engine, vrs []*longhor
 				Running:             e.Status.CurrentState == longhorn.InstanceStateRunning,
 				NodeID:              e.Spec.NodeID,
 				Address:             e.Status.IP,
-				EngineImage:         e.Spec.EngineImage,
+				Image:               e.Spec.Image,
 				CurrentImage:        e.Status.CurrentImage,
 				InstanceManagerName: e.Status.InstanceManagerName,
 			},
@@ -1308,7 +1417,7 @@ func toVolumeResource(v *longhorn.Volume, ves []*longhorn.Engine, vrs []*longhor
 				Running:             r.Status.CurrentState == longhorn.InstanceStateRunning,
 				Address:             r.Status.IP,
 				NodeID:              r.Spec.NodeID,
-				EngineImage:         r.Spec.EngineImage,
+				Image:               r.Spec.Image,
 				CurrentImage:        r.Status.CurrentImage,
 				InstanceManagerName: r.Status.InstanceManagerName,
 			},
@@ -1399,7 +1508,7 @@ func toVolumeResource(v *longhorn.Volume, ves []*longhorn.Engine, vrs []*longhor
 		BackupCompressionMethod:   v.Spec.BackupCompressionMethod,
 		StaleReplicaTimeout:       v.Spec.StaleReplicaTimeout,
 		Created:                   v.CreationTimestamp.String(),
-		EngineImage:               v.Spec.EngineImage,
+		Image:                     v.Spec.Image,
 		BackingImage:              v.Spec.BackingImage,
 		Standby:                   v.Spec.Standby,
 		DiskSelector:              v.Spec.DiskSelector,
@@ -1417,6 +1526,7 @@ func toVolumeResource(v *longhorn.Volume, ves []*longhorn.Engine, vrs []*longhor
 		UnmapMarkSnapChainRemoved:        v.Spec.UnmapMarkSnapChainRemoved,
 		ReplicaSoftAntiAffinity:          v.Spec.ReplicaSoftAntiAffinity,
 		ReplicaZoneSoftAntiAffinity:      v.Spec.ReplicaZoneSoftAntiAffinity,
+		ReplicaDiskSoftAntiAffinity:      v.Spec.ReplicaDiskSoftAntiAffinity,
 		BackendStoreDriver:               v.Spec.BackendStoreDriver,
 		OfflineReplicaRebuilding:         v.Spec.OfflineReplicaRebuilding,
 		OfflineReplicaRebuildingRequired: v.Status.OfflineReplicaRebuildingRequired,
@@ -1478,6 +1588,7 @@ func toVolumeResource(v *longhorn.Volume, ves []*longhorn.Engine, vrs []*longhor
 			actions["updateBackupCompressionMethod"] = struct{}{}
 			actions["updateReplicaSoftAntiAffinity"] = struct{}{}
 			actions["updateReplicaZoneSoftAntiAffinity"] = struct{}{}
+			actions["updateReplicaDiskSoftAntiAffinity"] = struct{}{}
 			actions["recurringJobAdd"] = struct{}{}
 			actions["recurringJobDelete"] = struct{}{}
 			actions["recurringJobList"] = struct{}{}
@@ -1506,6 +1617,7 @@ func toVolumeResource(v *longhorn.Volume, ves []*longhorn.Engine, vrs []*longhor
 			actions["updateBackupCompressionMethod"] = struct{}{}
 			actions["updateReplicaSoftAntiAffinity"] = struct{}{}
 			actions["updateReplicaZoneSoftAntiAffinity"] = struct{}{}
+			actions["updateReplicaDiskSoftAntiAffinity"] = struct{}{}
 			actions["pvCreate"] = struct{}{}
 			actions["pvcCreate"] = struct{}{}
 			actions["cancelExpansion"] = struct{}{}
@@ -1850,6 +1962,7 @@ func toNodeResource(node *longhorn.Node, address string, apiContext *api.ApiCont
 		Region:                    node.Status.Region,
 		Zone:                      node.Status.Zone,
 		InstanceManagerCPURequest: node.Spec.InstanceManagerCPURequest,
+		AutoEvicting:              node.Status.AutoEvicting,
 	}
 
 	disks := map[string]DiskInfo{}
@@ -1886,7 +1999,7 @@ func toNodeCollection(nodeList []*longhorn.Node, nodeIPMap map[string]string, ap
 	return &client.GenericCollection{Data: data, Collection: client.Collection{ResourceType: "node"}}
 }
 
-func toEventResource(event v1.Event) *Event {
+func toEventResource(event corev1.Event) *Event {
 	e := &Event{
 		Resource: client.Resource{
 			Id:    event.Name,
@@ -1899,7 +2012,7 @@ func toEventResource(event v1.Event) *Event {
 	return e
 }
 
-func toEventCollection(eventList *v1.EventList) *client.GenericCollection {
+func toEventCollection(eventList *corev1.EventList) *client.GenericCollection {
 	data := []interface{}{}
 	for _, event := range eventList.Items {
 		data = append(data, toEventResource(event))
@@ -2100,4 +2213,46 @@ func sliceToMap(conditions []longhorn.Condition) map[string]longhorn.Condition {
 		converted[c.Type] = c
 	}
 	return converted
+}
+
+func toObjectStoreResource(store *longhorn.ObjectStore, size, actualSize int64, image, uiImage string) *ObjectStore {
+	return &ObjectStore{
+		Resource: client.Resource{
+			Id:   store.Name,
+			Type: "objectStore",
+		},
+		Name:       store.Name,
+		State:      store.Status.State,
+		Endpoints:  store.Status.Endpoints,
+		Size:       size,
+		ActualSize: actualSize,
+		Image:      image,
+		UIImage:    uiImage,
+	}
+}
+
+func toSecretRefResource(secret *corev1.Secret) *SecretRef {
+	return &SecretRef{
+		Resource: client.Resource{
+			Id:   secret.Name,
+			Type: "secretRef",
+		},
+		Name:      secret.Name,
+		Namespace: secret.Namespace,
+	}
+}
+
+func toSecretRefCollection(secrets []*corev1.Secret, apiContext *api.ApiContext) *client.GenericCollection {
+	data := []interface{}{}
+
+	for _, secret := range secrets {
+		data = append(data, toSecretRefResource(secret))
+	}
+
+	return &client.GenericCollection{
+		Data: data,
+		Collection: client.Collection{
+			ResourceType: "secretRef",
+		},
+	}
 }

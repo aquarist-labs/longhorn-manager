@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -11,18 +12,18 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	clientset "k8s.io/client-go/kubernetes"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/controller"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	"github.com/longhorn/backupstore"
 
@@ -93,7 +94,7 @@ func NewBackupController(
 		ds: ds,
 
 		kubeClient:    kubeClient,
-		eventRecorder: eventBroadcaster.NewRecorder(scheme, v1.EventSource{Component: "longhorn-backup-controller"}),
+		eventRecorder: eventBroadcaster.NewRecorder(scheme, corev1.EventSource{Component: "longhorn-backup-controller"}),
 
 		proxyConnCounter: proxyConnCounter,
 	}
@@ -160,7 +161,8 @@ func (bc *BackupController) handleErr(err error, key interface{}) {
 		return
 	}
 
-	bc.logger.WithError(err).Errorf("Failed to sync Longhorn backup %v", key)
+	log := bc.logger.WithField("Backup", key)
+	handleReconcileErrorLogging(log, err, "Failed to sync Longhorn backup")
 	bc.queue.AddRateLimited(key)
 }
 
@@ -196,7 +198,7 @@ func (bc *BackupController) isBackupNotBeingUsedForVolumeRestore(backupName, bac
 		if !v.Status.RestoreRequired {
 			continue
 		}
-		engines, err := bc.ds.ListVolumeEngines(v.Name)
+		engines, err := bc.ds.ListVolumeEnginesRO(v.Name)
 		if err != nil {
 			return false, errors.Wrapf(err, "failed to list engines for volume %v for checking restore status", v.Name)
 		}
@@ -345,13 +347,13 @@ func (bc *BackupController) reconcile(backupName string) (err error) {
 	}()
 
 	// Perform backup snapshot to the remote backup target
-	// If the Backup CR is created by the user/API layer (spec.snapshotName != "") and has not been synced (status.lastSyncedAt == ""),
-	// it means creating a backup from a volume snapshot is required.
+	// If the Backup CR is created by the user/API layer (spec.snapshotName != ""), has not been synced (status.lastSyncedAt == "")
+	// and is not in final state, it means creating a backup from a volume snapshot is required.
 	// Hence the source of truth is the engine/replica and the controller needs to sync the status with it.
 	// Otherwise, the Backup CR is created by the backup volume controller, which means the backup already
 	// exists in the remote backup target before the CR creation.
 	// What the controller needs to do for this case is retrieve the info from the remote backup target.
-	if backup.Status.LastSyncedAt.IsZero() && backup.Spec.SnapshotName != "" {
+	if backup.Status.LastSyncedAt.IsZero() && backup.Spec.SnapshotName != "" && bc.backupNotInFinalState(backup) {
 		volume, err := bc.ds.GetVolume(backupVolumeName)
 		if err != nil {
 			if !apierrors.IsNotFound(err) {
@@ -442,6 +444,7 @@ func (bc *BackupController) reconcile(backupName string) (err error) {
 	backup.Status.VolumeCreated = backupInfo.VolumeCreated
 	backup.Status.VolumeBackingImageName = backupInfo.VolumeBackingImageName
 	backup.Status.CompressionMethod = longhorn.BackupCompressionMethod(backupInfo.CompressionMethod)
+	backup.Status.ObjectStoreBackup = backupInfo.ObjectStoreBackup
 	backup.Status.LastSyncedAt = syncTime
 	return nil
 }
@@ -478,7 +481,7 @@ func (bc *BackupController) handleAttachmentTicketCreation(backup *longhorn.Back
 		err = errors.Wrap(err, "handleAttachmentTicketCreation: failed to create/update attachment")
 	}()
 
-	vol, err := bc.ds.GetVolume(volumeName)
+	vol, err := bc.ds.GetVolumeRO(volumeName)
 	if err != nil {
 		return err
 	}
@@ -515,7 +518,7 @@ func (bc *BackupController) VerifyAttachment(backup *longhorn.Backup, volumeName
 		err = errors.Wrap(err, "VerifyAttachment: failed to verify attachment")
 	}()
 
-	vol, err := bc.ds.GetVolume(volumeName)
+	vol, err := bc.ds.GetVolumeRO(volumeName)
 	if err != nil {
 		return false, err
 	}
@@ -579,7 +582,7 @@ func (bc *BackupController) validateBackingImageChecksum(volName, biName string)
 		return "", nil
 	}
 
-	bi, err := bc.ds.GetBackingImage(biName)
+	bi, err := bc.ds.GetBackingImageRO(biName)
 	if err != nil {
 		return "", err
 	}
@@ -654,18 +657,47 @@ func (bc *BackupController) checkMonitor(backup *longhorn.Backup, volume *longho
 		}
 	}
 
+	objectStoreBackup := ""
+	// this volume is backing an ObjectStore, we will also backup the metadata of
+	// this ObjectStore
+	if component, ok := volume.Labels[types.GetLonghornLabelComponentKey()]; ok && component == types.LonghornLabelObjectStore {
+		objectStore, err := bc.ds.GetObjectStoreRO(getStoreName(volume))
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				bc.logger.Warnf("The ObjectStore of volume %v does not exist", volume.Name)
+			} else {
+				return nil, fmt.Errorf("Failed to find the ObjectStore of volume %v", volume.Name)
+			}
+		} else {
+			objectStoreBackupStruct := longhorn.ObjectStoreBackup{
+				Labels:      objectStore.Labels,
+				Annotations: objectStore.Annotations,
+				Spec:        objectStore.Spec,
+			}
+
+			objectStoreBackupBytes, err := json.Marshal(objectStoreBackupStruct)
+			if err != nil {
+			}
+
+			objectStoreBackup = string(objectStoreBackupBytes)
+		}
+	}
+
 	engine, err := bc.ds.GetVolumeCurrentEngine(volume.Name)
 	if err != nil {
 		return nil, err
 	}
 
-	if engine.Status.CurrentState != longhorn.InstanceStateRunning {
+	if engine.Status.CurrentState != longhorn.InstanceStateRunning ||
+		engine.Spec.DesireState != longhorn.InstanceStateRunning ||
+		volume.Status.State != longhorn.VolumeStateAttached {
 		return nil, fmt.Errorf("waiting for engine %v to be running before enabling backup monitor", engine.Name)
 	}
 
 	// Enable the backup monitor
 	monitor, err := bc.enableBackupMonitor(backup, volume, backupTargetClient, biChecksum,
-		volume.Spec.BackupCompressionMethod, int(concurrentLimit), storageClassName, engineClientProxy)
+		volume.Spec.BackupCompressionMethod, int(concurrentLimit), storageClassName,
+		objectStoreBackup, engineClientProxy)
 	if err != nil {
 		backup.Status.Error = err.Error()
 		backup.Status.State = longhorn.BackupStateError
@@ -738,7 +770,7 @@ func (bc *BackupController) hasMonitor(backupName string) *engineapi.BackupMonit
 }
 
 func (bc *BackupController) enableBackupMonitor(backup *longhorn.Backup, volume *longhorn.Volume, backupTargetClient *engineapi.BackupTargetClient,
-	biChecksum string, compressionMethod longhorn.BackupCompressionMethod, concurrentLimit int, storageClassName string,
+	biChecksum string, compressionMethod longhorn.BackupCompressionMethod, concurrentLimit int, storageClassName, objectStoreBackup string,
 	engineClientProxy engineapi.EngineClientProxy) (*engineapi.BackupMonitor, error) {
 	monitor := bc.hasMonitor(backup.Name)
 	if monitor != nil {
@@ -754,7 +786,7 @@ func (bc *BackupController) enableBackupMonitor(backup *longhorn.Backup, volume 
 	}
 
 	monitor, err = engineapi.NewBackupMonitor(bc.logger, bc.ds, backup, volume, backupTargetClient,
-		biChecksum, compressionMethod, concurrentLimit, storageClassName, engine, engineClientProxy, bc.enqueueBackupForMonitor)
+		biChecksum, compressionMethod, concurrentLimit, storageClassName, objectStoreBackup, engine, engineClientProxy, bc.enqueueBackupForMonitor)
 	if err != nil {
 		return nil, err
 	}
@@ -807,4 +839,14 @@ func (bc *BackupController) syncBackupStatusWithSnapshotCreationTimeAndVolumeSiz
 	}
 
 	backup.Status.SnapshotCreatedAt = snap.Created
+}
+
+func (bc *BackupController) backupNotInFinalState(backup *longhorn.Backup) bool {
+	return backup.Status.State != longhorn.BackupStateCompleted &&
+		backup.Status.State != longhorn.BackupStateError &&
+		backup.Status.State != longhorn.BackupStateUnknown
+}
+
+func getStoreName(volume *longhorn.Volume) string {
+	return volume.Annotations[types.LonghornAnnotationObjectStoreName]
 }

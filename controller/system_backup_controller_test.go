@@ -31,18 +31,6 @@ import (
 	. "gopkg.in/check.v1"
 )
 
-const (
-	TestSystemBackupName                    = "system-backup-0"
-	TestSystemBackupNameGetConfigFailed     = "system-backup-get-config-failed"
-	TestSystemBackupNameListFailed          = "system-backup-list-failed"
-	TestSystemBackupNameUploadFailed        = "system-backup-upload-failed"
-	TestSystemBackupNameUploadExceedTimeout = "system-backup-upload-exceed-timeout"
-
-	TestSystemBackupGitCommit       = "12345abcd"
-	TestSystemBackupLonghornVersion = "v1.4.0"
-	TestSystemBackupURIFmt          = "backupstore/system-backups/%v/%v"
-)
-
 type SystemBackupTestCase struct {
 	state longhorn.SystemBackupState
 
@@ -230,30 +218,24 @@ func (s *TestSuite) TestReconcileSystemBackup(c *C) {
 		fmt.Printf("testing %v\n", name)
 
 		kubeClient := fake.NewSimpleClientset()
-		kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, controller.NoResyncPeriodFunc())
-
 		lhClient := lhfake.NewSimpleClientset()
-		lhInformerFactory := lhinformers.NewSharedInformerFactory(lhClient, controller.NoResyncPeriodFunc())
-
-		fakeSystemRolloutNamespace(c, kubeInformerFactory, kubeClient)
-		fakeSystemRolloutSettingDefaultEngineImage(c, lhInformerFactory, lhClient)
-		fakeSystemRolloutBackupTargetDefault(c, lhInformerFactory, lhClient)
-		fakeSystemRolloutStorageClassesDefault(c, kubeInformerFactory, kubeClient)
-
-		fakeSystemRolloutVolumes(tc.existVolumes, c, lhInformerFactory, lhClient)
-		fakeSystemRolloutPersistentVolumes(tc.existPersistentVolumes, c, kubeInformerFactory, kubeClient)
-
 		extensionsClient := apiextensionsfake.NewSimpleClientset()
 
-		systemBackupController := newFakeSystemBackupController(
-			lhInformerFactory, kubeInformerFactory,
-			lhClient, kubeClient, extensionsClient,
-			tc.controllerID,
-		)
+		informerFactories := util.NewInformerFactories(TestNamespace, kubeClient, lhClient, controller.NoResyncPeriodFunc())
 
-		systemBackup := fakeSystemBackup(tc.systemBackupName, rolloutOwnerID, tc.systemBackupVersion, tc.isDeleting, tc.volumeBackupPolicy, tc.state, c, lhInformerFactory, lhClient)
+		fakeSystemRolloutNamespace(c, informerFactories.KubeInformerFactory, kubeClient)
+		fakeSystemRolloutSettingDefaultEngineImage(c, informerFactories.LhInformerFactory, lhClient)
+		fakeSystemRolloutBackupTargetDefault(c, informerFactories.LhInformerFactory, lhClient)
+		fakeSystemRolloutStorageClassesDefault(c, informerFactories.KubeInformerFactory, kubeClient)
+
+		fakeSystemRolloutVolumes(tc.existVolumes, c, informerFactories.LhInformerFactory, lhClient)
+		fakeSystemRolloutPersistentVolumes(tc.existPersistentVolumes, c, informerFactories.KubeInformerFactory, kubeClient)
+
+		systemBackupController := newFakeSystemBackupController(lhClient, kubeClient, extensionsClient, informerFactories, tc.controllerID)
+
+		systemBackup := fakeSystemBackup(tc.systemBackupName, rolloutOwnerID, tc.systemBackupVersion, tc.isDeleting, tc.volumeBackupPolicy, tc.state, c, informerFactories.LhInformerFactory, lhClient)
 		if tc.notExist {
-			systemBackup = fakeSystemBackup("none", rolloutOwnerID, tc.systemBackupVersion, tc.isDeleting, tc.volumeBackupPolicy, tc.state, c, lhInformerFactory, lhClient)
+			systemBackup = fakeSystemBackup("none", rolloutOwnerID, tc.systemBackupVersion, tc.isDeleting, tc.volumeBackupPolicy, tc.state, c, informerFactories.LhInformerFactory, lhClient)
 		}
 
 		systemBackupTempDir, err := os.MkdirTemp(os.TempDir(), fmt.Sprintf("*-%v", TestSystemBackupName))
@@ -270,7 +252,7 @@ func (s *TestSuite) TestReconcileSystemBackup(c *C) {
 			for _, backup := range backups {
 				backup.Status.State = longhorn.BackupStateCompleted
 			}
-			fakeSystemRolloutBackups(backups, c, lhInformerFactory, lhClient)
+			fakeSystemRolloutBackups(backups, c, informerFactories.LhInformerFactory, lhClient)
 			systemBackupController.WaitForVolumeBackupToComplete(backups, systemBackup)
 
 		case longhorn.SystemBackupStateGenerating:
@@ -315,15 +297,9 @@ func (s *TestSuite) TestReconcileSystemBackup(c *C) {
 	}
 }
 
-func newFakeSystemBackupController(
-	lhInformerFactory lhinformers.SharedInformerFactory,
-	kubeInformerFactory informers.SharedInformerFactory,
-	lhClient *lhfake.Clientset,
-	kubeClient *fake.Clientset,
-	extensionsClient *apiextensionsfake.Clientset,
-	controllerID string) *SystemBackupController {
-
-	ds := datastore.NewDataStore(lhInformerFactory, lhClient, kubeInformerFactory, kubeClient, extensionsClient, TestNamespace)
+func newFakeSystemBackupController(lhClient *lhfake.Clientset, kubeClient *fake.Clientset, extensionsClient *apiextensionsfake.Clientset,
+	informerFactories *util.InformerFactories, controllerID string) *SystemBackupController {
+	ds := datastore.NewDataStore(TestNamespace, lhClient, kubeClient, extensionsClient, informerFactories)
 
 	logger := logrus.StandardLogger()
 	logrus.SetLevel(logrus.DebugLevel)

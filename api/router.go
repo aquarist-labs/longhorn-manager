@@ -4,9 +4,10 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
+
 	"github.com/rancher/go-rancher/api"
 	"github.com/rancher/go-rancher/client"
-	"github.com/sirupsen/logrus"
 
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/metrics_collector/registry"
@@ -76,6 +77,7 @@ func NewRouter(s *Server) *mux.Router {
 		"updateUnmapMarkSnapChainRemoved":   s.VolumeUpdateUnmapMarkSnapChainRemoved,
 		"updateReplicaSoftAntiAffinity":     s.VolumeUpdateReplicaSoftAntiAffinity,
 		"updateReplicaZoneSoftAntiAffinity": s.VolumeUpdateReplicaZoneSoftAntiAffinity,
+		"updateReplicaDiskSoftAntiAffinity": s.VolumeUpdateReplicaDiskSoftAntiAffinity,
 		"activate":                          s.VolumeActivate,
 		"expand":                            s.VolumeExpand,
 		"cancelExpansion":                   s.VolumeCancelExpansion,
@@ -195,6 +197,13 @@ func NewRouter(s *Server) *mux.Router {
 	r.Methods("GET").Path("/v1/systemrestores/{name}").Handler(f(schemas, s.SystemRestoreGet))
 	r.Methods("DELETE").Path("/v1/systemrestores/{name}").Handler(f(schemas, s.SystemRestoreDelete))
 
+	r.Methods("GET").Path("/v1/objectstores").Handler(f(schemas, s.ObjectStoreList))
+	r.Methods("POST").Path("/v1/objectstores").Handler(f(schemas, s.ObjectStoreCreate))
+	r.Methods("PUT").Path("/v1/objectstores/{name}").Handler(f(schemas, s.ObjectStoreUpdate))
+	r.Methods("DELETE").Path("/v1/objectstores/{name}").Handler(f(schemas, s.ObjectStoreDelete))
+
+	r.Methods("GET").Path("/v1/secrets").Handler(f(schemas, s.TLSSecretList))
+
 	settingListStream := NewStreamHandlerFunc("settings", s.wsc.NewWatcher("setting"), s.settingList)
 	r.Path("/v1/ws/settings").Handler(f(schemas, settingListStream))
 	r.Path("/v1/ws/{period}/settings").Handler(f(schemas, settingListStream))
@@ -250,6 +259,14 @@ func NewRouter(s *Server) *mux.Router {
 	eventListStream := NewStreamHandlerFunc("events", s.wsc.NewWatcher("event"), s.eventList)
 	r.Path("/v1/ws/events").Handler(f(schemas, eventListStream))
 	r.Path("/v1/ws/{period}/events").Handler(f(schemas, eventListStream))
+
+	objectStoreListStream := NewStreamHandlerFunc("objectstores", s.wsc.NewWatcher("objectStore"), s.objectStoreList)
+	r.Path("/v1/ws/objectstores").Handler(f(schemas, objectStoreListStream))
+	r.Path("/v1/ws/{period}/objectstores").Handler(f(schemas, objectStoreListStream))
+
+	secretListStream := NewStreamHandlerFunc("secrets", s.wsc.NewWatcher("secret"), s.tlsSecretList)
+	r.Path("/v1/ws/secrets").Handler(f(schemas, secretListStream))
+	r.Path("/v1/ws/{period}/secrets").Handler(f(schemas, secretListStream))
 
 	return r
 }

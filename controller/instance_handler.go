@@ -8,18 +8,20 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
+
+	corev1 "k8s.io/api/core/v1"
 
 	imapi "github.com/longhorn/longhorn-instance-manager/pkg/api"
 
 	"github.com/longhorn/longhorn-manager/constant"
 	"github.com/longhorn/longhorn-manager/datastore"
 	"github.com/longhorn/longhorn-manager/engineapi"
-	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	"github.com/longhorn/longhorn-manager/types"
+
+	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 )
 
 // InstanceHandler can handle the state transition of correlated instance and
@@ -139,7 +141,7 @@ func (h *InstanceHandler) syncStatusWithInstanceManager(im *longhorn.InstanceMan
 	case longhorn.InstanceStateRunning:
 		status.CurrentState = longhorn.InstanceStateRunning
 
-		imPod, err := h.ds.GetPod(im.Name)
+		imPod, err := h.ds.GetPodRO(im.Namespace, im.Name)
 		if err != nil {
 			logrus.WithError(err).Errorf("Failed to get instance manager pod from %v", im.Name)
 			return
@@ -165,9 +167,9 @@ func (h *InstanceHandler) syncStatusWithInstanceManager(im *longhorn.InstanceMan
 			logrus.Warnf("Instance %v starts running, Port %d", instanceName, status.Port)
 		}
 		// only set CurrentImage when first started, since later we may specify
-		// different spec.EngineImage for upgrade
+		// different spec.Image for upgrade
 		if status.CurrentImage == "" {
-			status.CurrentImage = spec.EngineImage
+			status.CurrentImage = spec.Image
 		}
 	case longhorn.InstanceStateStopping:
 		if status.Started {
@@ -232,7 +234,7 @@ func (h *InstanceHandler) ReconcileInstanceState(obj interface{}, spec *longhorn
 	var im *longhorn.InstanceManager
 	if !isCLIAPIVersionOne {
 		if status.InstanceManagerName != "" {
-			im, err = h.ds.GetInstanceManager(status.InstanceManagerName)
+			im, err = h.ds.GetInstanceManagerRO(status.InstanceManagerName)
 			if err != nil {
 				if !datastore.ErrorIsNotFound(err) {
 					return err
@@ -240,14 +242,14 @@ func (h *InstanceHandler) ReconcileInstanceState(obj interface{}, spec *longhorn
 			}
 		}
 		// There should be an available instance manager for a scheduled instance when its related engine image is compatible
-		if im == nil && spec.EngineImage != "" && spec.NodeID != "" {
+		if im == nil && spec.Image != "" && spec.NodeID != "" {
 			// The related node maybe cleaned up then there is no available instance manager for this instance (typically it's replica).
 			isNodeDownOrDeleted, err := h.ds.IsNodeDownOrDeleted(spec.NodeID)
 			if err != nil {
 				return err
 			}
 			if !isNodeDownOrDeleted {
-				im, err = h.ds.GetInstanceManagerByInstance(obj)
+				im, err = h.ds.GetInstanceManagerByInstanceRO(obj)
 				if err != nil {
 					return errors.Wrapf(err, "failed to get instance manager for instance %v", instanceName)
 				}
@@ -444,13 +446,13 @@ func (h *InstanceHandler) createInstance(instanceName string, backendStoreDriver
 	logrus.Infof("Creating instance %v", instanceName)
 	if _, err := h.instanceManagerHandler.CreateInstance(obj); err != nil {
 		if !types.ErrorAlreadyExists(err) {
-			h.eventRecorder.Eventf(obj, v1.EventTypeWarning, constant.EventReasonFailedStarting, "Error starting %v: %v", instanceName, err)
+			h.eventRecorder.Eventf(obj, corev1.EventTypeWarning, constant.EventReasonFailedStarting, "Error starting %v: %v", instanceName, err)
 			return err
 		}
 		// Already exists, lost track may due to previous datastore conflict
 		return nil
 	}
-	h.eventRecorder.Eventf(obj, v1.EventTypeNormal, constant.EventReasonStart, "Starts %v", instanceName)
+	h.eventRecorder.Eventf(obj, corev1.EventTypeNormal, constant.EventReasonStart, "Starts %v", instanceName)
 
 	return nil
 }
@@ -459,10 +461,10 @@ func (h *InstanceHandler) deleteInstance(instanceName string, obj runtime.Object
 	// May try to force deleting instances on lost node. Don't need to check the instance
 	logrus.Infof("Deleting instance %v", instanceName)
 	if err := h.instanceManagerHandler.DeleteInstance(obj); err != nil {
-		h.eventRecorder.Eventf(obj, v1.EventTypeWarning, constant.EventReasonFailedStopping, "Error stopping %v: %v", instanceName, err)
+		h.eventRecorder.Eventf(obj, corev1.EventTypeWarning, constant.EventReasonFailedStopping, "Error stopping %v: %v", instanceName, err)
 		return err
 	}
-	h.eventRecorder.Eventf(obj, v1.EventTypeNormal, constant.EventReasonStop, "Stops %v", instanceName)
+	h.eventRecorder.Eventf(obj, corev1.EventTypeNormal, constant.EventReasonStop, "Stops %v", instanceName)
 
 	return nil
 }
